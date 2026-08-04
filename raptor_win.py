@@ -69,8 +69,10 @@ SARIF_LEVEL = {"CRITICAL": "error", "ERROR": "error", "HIGH": "error",
 # Paths that are dev tooling / tests — taint findings there are usually false
 # positives (they hit *your own* known endpoints/paths, not attacker input).
 TOOLING_RE = re.compile(
-    r"(^|[\\/])(tests?|spec|specs|__tests__|scripts?|tools?|examples?|fixtures?|e2e|benchmarks?)([\\/]|$)"
-    r"|(test|spec|pentest|verificar|verify|conferir|doctor|smoke)\.",
+    r"(^|[\\/])(tests?|spec|specs|__tests__|scripts?|tools?|examples?|fixtures?|e2e|benchmarks?|migrations?)([\\/]|$)"
+    # scripts/tests/migrations do supabase/ — MENOS as Edge Functions, que são runtime
+    r"|(^|[\\/])supabase[\\/](?!functions[\\/])"
+    r"|(test|spec|pentest|verificar|verify|conferir|doctor|smoke|sessao|session|validar|sincroniz|sync|migrar|preparar|diagnostico|seed|stamp)\.",
     re.IGNORECASE,
 )
 TAINT_CATEGORIES = ("ssrf", "path_traversal", "path-traversal", "injection", "traversal")
