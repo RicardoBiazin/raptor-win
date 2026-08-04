@@ -1,0 +1,19 @@
+raptor-win
+==========
+
+This product includes software developed by the RAPTOR project.
+
+The Semgrep rule files under `rules/raptor/` are copied, unmodified, from RAPTOR
+(https://github.com/gadievron/raptor) and are licensed under the MIT License.
+
+  RAPTOR — Autonomous Offensive/Defensive Research Framework
+  Copyright (c) 2025-2026 Gadi Evron, Daniel Cuthbert, Thomas Dullien (Halvar Flake),
+  Michael Bargury, John Cartwright
+
+The full text of RAPTOR's licence is included at THIRD_PARTY/RAPTOR-LICENSE.txt.
+
+raptor-win is an independent wrapper and is NOT affiliated with or endorsed by the
+RAPTOR project or its authors.
+
+Semgrep and the Semgrep Registry rule packs referenced at runtime (e.g. "p/secrets",
+"p/typescript", "p/python") are © Semgrep, Inc. and used under their terms.

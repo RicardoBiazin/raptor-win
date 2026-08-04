@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Saídas de scan (nunca versionar resultados — podem conter caminhos/código de terceiros)
+*.sarif
+findings*.json
+report*.md
+out/
+.out/
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
