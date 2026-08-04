@@ -28,6 +28,24 @@ import subprocess
 import sys
 import urllib.request
 from collections import Counter, defaultdict
+
+import secrets_scan
+
+# O CONSOLE DO WINDOWS NÃO É UTF-8 POR PADRÃO. Ele abre em cp1252, que não
+# tem "✅" nem os caracteres de moldura do relatório — e o `print` levanta
+# UnicodeEncodeError. O efeito era um traceback no lugar do resultado,
+# justamente quando NÃO havia achados (o caminho mais comum), e acentos
+# corrompidos no resto ("relat�rio"). Numa ferramenta que se anuncia
+# Windows-friendly, era o defeito mais caro que ela tinha.
+#
+# `errors="replace"` em vez de deixar estourar: um terminal antigo que não
+# renderize um símbolo deve mostrar "?" ali, não derrubar a varredura
+# inteira depois de ela já ter feito todo o trabalho.
+for _fluxo in (sys.stdout, sys.stderr):
+    try:
+        _fluxo.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass   # fluxo redirecionado ou Python sem reconfigure: segue
 from datetime import datetime
 from pathlib import Path
 
@@ -493,6 +511,34 @@ def run_sca(targets: list[Path]) -> "dict | None":
     return {"sources": sources, "deps": len(deps), "vulns": hits, "details": details}
 
 
+def render_secrets(achados: list[dict]) -> None:
+    print()
+    print("=" * 62)
+    print(" raptor-win — credenciais")
+    print("=" * 62)
+    if not achados:
+        print(" Nenhuma credencial exposta. ✅")
+        print(" (inclui: nenhum arquivo de segredo fora do .gitignore)")
+        return
+
+    porsev = Counter(a["severity"] for a in achados)
+    print(" " + "  ".join(f"{k}: {porsev[k]}" for k in SEV_RANK if porsev.get(k)))
+    print("-" * 62)
+    for a in achados:
+        onde = a["path"] + (f":{a['line']}" if a["line"] else "")
+        print(f" [{a['severity']:<8}] {short_rule(a['rule'])}")
+        print(f"            {onde}")
+        print(f"            {a['message']}")
+    print("-" * 62)
+    # O QUE FAZER importa mais que O QUE FOI ACHADO. Tirar do arquivo não
+    # desfaz nada: se já foi comitado, está no histórico, e quem clonou
+    # tem uma cópia. A única correção real é rotacionar.
+    if any(a["rule"] != "secrets.arquivo-nao-ignorado" for a in achados):
+        print(" Credencial já commitada NÃO se corrige apagando a linha: ela fica")
+        print(" no histórico e em cada clone. Rotacione a credencial primeiro,")
+        print(" depois limpe o arquivo.")
+
+
 def render_sca(sca: dict) -> None:
     print("\n" + "=" * 62)
     print(" raptor-win — SCA (dependências vulneráveis · OSV.dev)")
@@ -529,6 +575,7 @@ def main() -> int:
     ap.add_argument("--json-out", metavar="FILE", help="escreve o JSON bruto do Semgrep")
     ap.add_argument("--changed", metavar="REF", help="escanear só arquivos alterados desde <ref> git (ex.: origin/main)")
     ap.add_argument("--sca", action="store_true", help="também checar dependências vulneráveis (requirements.txt / package-lock.json) via OSV.dev")
+    ap.add_argument("--secrets", action="store_true", help="também procurar credenciais no repositório e arquivos de segredo fora do .gitignore")
     ap.add_argument("--no-raptor", action="store_true", help="não usar as regras do RAPTOR")
     ap.add_argument("--no-registry", action="store_true", help="não usar os packs do Semgrep Registry")
     ap.add_argument("--raptor-rules", metavar="DIR", help="caminho alternativo para as regras do RAPTOR")
@@ -560,11 +607,12 @@ def main() -> int:
     raptor_rules = Path(args.raptor_rules).resolve() if args.raptor_rules else RAPTOR_RULES
     exts = detect_languages(targets)
     configs = build_configs(exts, not args.no_raptor, not args.no_registry, raptor_rules)
-    if not configs and not args.sca:
+    if not configs and not args.sca and not args.secrets:
         sys.stderr.write("nenhuma configuração de regra selecionada (e --sca não foi pedido).\n")
         return 2
 
     findings: list[dict] = []
+    files_scanned = rules_run = 0
     if configs:
         if not semgrep:
             sys.stderr.write(
@@ -590,10 +638,27 @@ def main() -> int:
             Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
             print(f"SARIF: {args.sarif}")
 
+    # Os achados de credencial entram na MESMA lista dos de código, de
+    # propósito: assim atravessam console, Markdown, SARIF e --fail-on sem
+    # nenhum tratamento à parte. Um segredo comitado é achado de segurança
+    # como outro qualquer — não merece um relatório separado que ninguém lê.
+    if args.secrets:
+        seg = secrets_scan.escanear(sca_targets, SKIP_DIRS)
+        findings = sorted(findings + seg,
+                          key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
+        render_secrets(seg)
+        if args.md:
+            Path(args.md).write_text(
+                render_markdown(findings, str(targets[0]), files_scanned if configs else 0,
+                                rules_run if configs else 0),
+                encoding="utf-8")
+        if args.sarif:
+            Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
+
     if args.sca:
         render_sca(run_sca(sca_targets))
 
-    if args.fail_on and configs:
+    if args.fail_on and (configs or args.secrets):
         floor = SEV_RANK[args.fail_on]
         real = [f for f in findings if "provável falso-positivo" not in f["context"]
                 and SEV_RANK.get(f["severity"], 9) <= floor]

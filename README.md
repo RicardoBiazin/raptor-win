@@ -24,6 +24,7 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | Static analysis (Semgrep) | Run/execute any target code |
 | RAPTOR rules + Registry packs (auto by language) | Fuzzing, binary analysis, `rr` |
 | **Dependency scanning (SCA) via OSV.dev** (`--sca`) | Generate exploits or patches |
+| **Secret scanning (`--secrets`)**, incl. secret files not in `.gitignore` | — |
 | De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
 | Console + Markdown + **SARIF** + raw JSON report | — |
 | Diff mode (`--changed`) + CI exit codes (`--fail-on`) | — |
@@ -68,6 +69,23 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--json-out FILE` — write Semgrep's raw JSON.
 - `--changed REF` — scan **only files changed since a git ref** (e.g. `origin/main`). Perfect for
   pull-request / CI gating: fast, and it fails only on *new* problems.
+- `--secrets` — also run **secret scanning**. Two things, and the second is the one
+  content scanners don't do:
+
+  1. **Credential patterns** in file contents — private keys, AWS/GitHub/Slack/Stripe/Google
+     tokens, Supabase `sb_secret_`, OpenAI `sk-`, Groq `gsk_`, NVIDIA `nvapi-`, JWTs, passwords
+     embedded in connection strings, plus long literals assigned to secret-looking names.
+  2. **Secret-bearing files that git isn't ignoring.** A `.env` outside `.gitignore` hasn't
+     leaked *yet* — it leaks on the next `git add -A`, and by then the only real fix is rotating
+     the credential. This check asks git directly, so it can't false-positive.
+
+  Runs without Semgrep (`--secrets --no-raptor --no-registry`). Findings join the normal list, so
+  they flow through the console, Markdown, SARIF and `--fail-on` with no special handling.
+
+  Precision over recall, deliberately: named provider prefixes instead of entropy scoring. An
+  entropy scanner flags every lockfile hash and build id, and a noisy report is a report nobody
+  reads. Measured on three real repositories: **0 false positives**.
+
 - `--sca` — also run **dependency scanning (SCA)**: parses `requirements.txt`, `package-lock.json`,
   `poetry.lock`, `Pipfile.lock`, **and enumerates packages actually installed in a project's `.venv`**
   (so unpinned `requirements.txt` still gets checked), then queries **OSV.dev** (free, no key) and

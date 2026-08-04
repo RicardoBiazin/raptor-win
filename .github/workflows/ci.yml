@@ -27,3 +27,27 @@ jobs:
           echo '--- report ---'; cat report.md
           # o scanner tem de ter achado ao menos uma vulnerabilidade nas amostras
           grep -Eq 'CRITICAL|ERROR|HIGH|WARNING' report.md
+      - name: Smoke da varredura de credenciais
+        run: |
+          # Fixture: um .env com senha, FORA do .gitignore — o cenário que
+          # a checagem de exposição existe para pegar antes de virar commit.
+          mkdir -p /tmp/segredos && cd /tmp/segredos && git init -q
+          printf 'node_modules
+' > .gitignore
+          printf 'DB=postgresql://u:S3nh4Real9@host:5432/db
+' > .env
+          printf 'const t = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+' > app.js
+          cd - >/dev/null
+          python raptor_win.py /tmp/segredos --secrets --no-raptor --no-registry > sec.txt 2>&1 || true
+          cat sec.txt
+          grep -q 'arquivo-nao-ignorado' sec.txt   # .env exposto ao git
+          grep -q 'conexao-com-senha'    sec.txt   # senha na string de conexão
+          grep -q 'github-token'         sec.txt   # token no código
+      - name: Sem falso-positivo no próprio repositório
+        run: |
+          # A ferramenta não pode acusar a si mesma: se acusar, a regra
+          # está larga demais e o relatório vira ruído.
+          python raptor_win.py . --secrets --no-raptor --no-registry > self.txt 2>&1 || true
+          cat self.txt
+          grep -q 'Nenhuma credencial exposta' self.txt
