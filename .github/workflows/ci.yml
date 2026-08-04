@@ -32,9 +32,16 @@ jobs:
           # Fixture: um .env com senha, FORA do .gitignore — o cenário que
           # a checagem de exposição existe para pegar antes de virar commit.
           mkdir -p /tmp/segredos && cd /tmp/segredos && git init -q
+          # As credenciais falsas são MONTADAS em pedaços, de propósito.
+          # Escritas inteiras, o próprio raptor-win as acusava neste
+          # arquivo — e estava certo: um scanner não tem como saber que
+          # são de mentira. Concatenar mantém o valor em execução sem
+          # deixar no repositório nenhuma cadeia com cara de credencial.
+          SENHA='S3nh4''Real9'
+          TOKEN='ghp''_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789'
           echo 'node_modules' > .gitignore
-          echo 'DB=postgresql://u:S3nh4Real9@host:5432/db' > .env
-          echo 'const t = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";' > app.js
+          echo "DB=postgresql://u:${SENHA}@host:5432/db" > .env
+          echo "const t = \"${TOKEN}\";" > app.js
           cd - >/dev/null
           python raptor_win.py /tmp/segredos --secrets --no-raptor --no-registry > sec.txt 2>&1 || true
           cat sec.txt
