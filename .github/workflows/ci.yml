@@ -1,0 +1,28 @@
+name: CI
+
+# Compila o scanner e roda um smoke test: o raptor-win precisa detectar as
+# vulnerabilidades plantadas em test/fixtures (weak hash, command injection, SSRF).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compilar
+        run: python -m py_compile raptor_win.py
+      - name: Instalar Semgrep
+        run: python -m pip install --quiet semgrep
+      - name: Smoke scan das fixtures
+        run: |
+          python raptor_win.py test/fixtures --md report.md --json-out findings.json
+          echo '--- report ---'; cat report.md
+          # o scanner tem de ter achado ao menos uma vulnerabilidade nas fixtures
+          grep -Eq 'CRITICAL|ERROR|HIGH|WARNING' report.md
