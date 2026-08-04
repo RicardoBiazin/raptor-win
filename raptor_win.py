@@ -43,9 +43,19 @@ LANG_PACKS: dict[str, list[str]] = {
 # Packs added regardless of language.
 ALWAYS_PACKS = ["p/secrets"]
 
-# Directories never worth scanning.
-SKIP_DIRS = {"node_modules", ".git", "dist", "build", ".venv", "venv", "__pycache__",
-             ".next", "out", ".out", "vendor", "target", ".mypy_cache", ".pytest_cache"}
+# Directories never worth scanning (dependencies, build output, generated caches).
+# Scanning third-party code just floods the report with other people's findings.
+SKIP_DIRS = {
+    # deps / envs
+    "node_modules", ".venv", "venv", "site-packages", ".tox", ".eggs", "eggs",
+    "vendor", "bower_components",
+    # build output
+    "dist", "build", "out", ".out", "target", ".next", ".nuxt", ".svelte-kit",
+    ".angular", ".serverless", ".terraform",
+    # caches / vcs / tooling
+    ".git", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".gradle", ".cache", "htmlcov",
+}
 
 # Severity ordering (Semgrep uses ERROR/WARNING/INFO; registry rules also emit
 # CRITICAL/HIGH/MEDIUM/LOW in extra.severity/metadata).
