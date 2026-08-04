@@ -200,7 +200,12 @@ def render_console(findings: list[dict], files_scanned: int, rules_run: int) -> 
     print(f" total: {len(findings)}  ·  fora de tooling/teste: {len(real)}")
     print("-" * 62)
     if not findings:
-        print(" Nenhum achado. ✅")
+        if files_scanned == 0:
+            print(" ⚠ 0 arquivos escaneáveis. O Semgrep ignora por padrão pastas como")
+            print("   test/ tests/ fixtures/ node_modules/ .venv/ — aponte para o código-")
+            print("   fonte (ex.: 'src' ou a raiz do app), não para uma pasta de testes.")
+        else:
+            print(" Nenhum achado. ✅")
         return
     for f in findings:
         tag = f"  [{f['context']}]" if f["context"] else ""
