@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -318,6 +319,147 @@ def changed_files(target: Path, ref: str) -> "list[Path] | None":
     return files
 
 
+# ── SCA (Software Composition Analysis) via OSV.dev — só stdlib, sem chave ──────
+OSV_BATCH = "https://api.osv.dev/v1/querybatch"
+OSV_VULN = "https://api.osv.dev/v1/vulns/"
+SCA_MANIFESTS = ("requirements.txt", "package-lock.json")
+SCA_DETAIL_CAP = 80  # nº máx. de detalhes de vuln buscados (evita floods)
+
+
+def find_manifests(targets: list[Path]) -> list[Path]:
+    out: list[Path] = []
+    for t in targets:
+        if t.is_file() and t.name in SCA_MANIFESTS:
+            out.append(t)
+            continue
+        if t.is_dir():
+            for p in t.rglob("*"):
+                if p.name in SCA_MANIFESTS and p.is_file() and not any(x in SKIP_DIRS for x in p.parts):
+                    out.append(p)
+    return out
+
+
+def parse_requirements(path: Path) -> list[tuple[str, str, str]]:
+    deps = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        m = re.match(r"^([A-Za-z0-9._-]+)\s*(?:\[[^\]]+\])?\s*===?\s*([A-Za-z0-9._+!-]+)", line)
+        if m:  # só pinado (name==version) dá para consultar versão exata
+            deps.append(("PyPI", m.group(1), m.group(2)))
+    return deps
+
+
+def parse_package_lock(path: Path) -> list[tuple[str, str, str]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    out: set[tuple[str, str, str]] = set()
+    pkgs = data.get("packages")
+    if isinstance(pkgs, dict):  # lockfile v2/v3
+        for k, v in pkgs.items():
+            name = k.split("node_modules/")[-1]
+            ver = (v or {}).get("version")
+            if name and ver:
+                out.add(("npm", name, ver))
+    else:  # v1: dependencies recursivo
+        def walk(deps):
+            for name, v in (deps or {}).items():
+                ver = (v or {}).get("version")
+                if ver:
+                    out.add(("npm", name, ver))
+                walk((v or {}).get("dependencies"))
+        walk(data.get("dependencies"))
+    return sorted(out)
+
+
+def _osv_severity(v: dict) -> str:
+    ds = (v.get("database_specific") or {}).get("severity")
+    if ds:
+        return str(ds).upper()
+    for s in v.get("severity", []) or []:
+        sc = str(s.get("score", ""))
+        m = re.search(r"/S:.|(\d+\.\d+)$", sc)  # tenta um número CVSS ao final
+        num = re.search(r"(\d+\.\d+)", sc)
+        if num:
+            f = float(num.group(1))
+            return "CRITICAL" if f >= 9 else "HIGH" if f >= 7 else "MEDIUM" if f >= 4 else "LOW"
+    return "UNKNOWN"
+
+
+def _osv_fixed(v: dict) -> str:
+    fixes = []
+    for aff in v.get("affected", []) or []:
+        for rng in aff.get("ranges", []) or []:
+            for ev in rng.get("events", []) or []:
+                if ev.get("fixed"):
+                    fixes.append(ev["fixed"])
+    return ", ".join(sorted(set(fixes)))
+
+
+def run_sca(targets: list[Path]) -> "dict | None":
+    manifests = find_manifests(targets)
+    deps: list[tuple[str, str, str]] = []
+    for m in manifests:
+        deps += parse_requirements(m) if m.name == "requirements.txt" else parse_package_lock(m)
+    # dedup preservando ordem
+    seen: set = set()
+    deps = [d for d in deps if not (d in seen or seen.add(d))]
+    if not deps:
+        return {"manifests": manifests, "deps": 0, "vulns": {}}
+    queries = [{"package": {"name": n, "ecosystem": e}, "version": v} for (e, n, v) in deps]
+    hits: dict[tuple, list[str]] = {}
+    try:
+        for i in range(0, len(queries), 500):
+            body = json.dumps({"queries": queries[i:i + 500]}).encode()
+            req = urllib.request.Request(OSV_BATCH, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                res = json.loads(r.read()).get("results", [])
+            for dep, item in zip(deps[i:i + 500], res):
+                ids = [x["id"] for x in (item.get("vulns") or [])]
+                if ids:
+                    hits[dep] = ids
+    except Exception as ex:
+        return {"error": str(ex), "manifests": manifests, "deps": len(deps)}
+    # busca detalhes (limitada) para severidade/summary/fix
+    details: dict[str, dict] = {}
+    uniq = [vid for ids in hits.values() for vid in ids]
+    for vid in list(dict.fromkeys(uniq))[:SCA_DETAIL_CAP]:
+        try:
+            with urllib.request.urlopen(OSV_VULN + vid, timeout=15) as r:
+                details[vid] = json.loads(r.read())
+        except Exception:
+            details[vid] = {}
+    return {"manifests": manifests, "deps": len(deps), "vulns": hits, "details": details}
+
+
+def render_sca(sca: dict) -> None:
+    print("\n" + "=" * 62)
+    print(" raptor-win — SCA (dependências vulneráveis · OSV.dev)")
+    print("=" * 62)
+    if sca.get("error"):
+        print(f" ⚠ OSV indisponível ({sca['error']}). {sca.get('deps', 0)} dependência(s) não checada(s).")
+        return
+    mans = sca.get("manifests", [])
+    print(f" manifests: {', '.join(m.name for m in mans) or '—'}  ·  dependências pinadas: {sca.get('deps', 0)}")
+    hits = sca.get("vulns", {})
+    if not hits:
+        print(" Nenhuma dependência vulnerável conhecida. ✅")
+        return
+    det = sca.get("details", {})
+    for (eco, name, ver), ids in sorted(hits.items()):
+        print(f"\n {eco}  {name}@{ver} — {len(ids)} vuln(s)")
+        for vid in ids:
+            v = det.get(vid, {})
+            sev = _osv_severity(v) if v else "?"
+            fixed = _osv_fixed(v) if v else ""
+            summ = (v.get("summary") or (v.get("details", "")[:80]) or "").strip().replace("\n", " ")
+            print(f"   [{sev:<8}] {vid}  {summ[:90]}")
+            print(f"     corrigido em: {fixed or '—'}   ·   https://osv.dev/vulnerability/{vid}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="raptor-win",
@@ -328,6 +470,7 @@ def main() -> int:
     ap.add_argument("--sarif", metavar="FILE", help="escreve SARIF 2.1.0 (upload no GitHub Code Scanning)")
     ap.add_argument("--json-out", metavar="FILE", help="escreve o JSON bruto do Semgrep")
     ap.add_argument("--changed", metavar="REF", help="escanear só arquivos alterados desde <ref> git (ex.: origin/main)")
+    ap.add_argument("--sca", action="store_true", help="também checar dependências vulneráveis (requirements.txt / package-lock.json) via OSV.dev")
     ap.add_argument("--no-raptor", action="store_true", help="não usar as regras do RAPTOR")
     ap.add_argument("--no-registry", action="store_true", help="não usar os packs do Semgrep Registry")
     ap.add_argument("--raptor-rules", metavar="DIR", help="caminho alternativo para as regras do RAPTOR")
@@ -336,19 +479,14 @@ def main() -> int:
     args = ap.parse_args()
 
     semgrep = find_semgrep()
-    if not semgrep:
-        sys.stderr.write(
-            "Semgrep não encontrado. Instale com:\n"
-            "  python -m pip install semgrep\n"
-            "e garanta que a pasta Scripts do Python esteja no PATH.\n"
-        )
-        return 2
 
     targets = [Path(t).resolve() for t in args.target]
     for t in targets:
         if not t.exists():
             sys.stderr.write(f"alvo inexistente: {t}\n")
             return 2
+
+    sca_targets = list(targets)  # SCA usa os alvos originais (dirs), não a lista do --changed
 
     if args.changed:
         cf = changed_files(targets[0], args.changed)
@@ -364,31 +502,40 @@ def main() -> int:
     raptor_rules = Path(args.raptor_rules).resolve() if args.raptor_rules else RAPTOR_RULES
     exts = detect_languages(targets)
     configs = build_configs(exts, not args.no_raptor, not args.no_registry, raptor_rules)
-    if not configs:
-        sys.stderr.write("nenhuma configuração de regra selecionada.\n")
+    if not configs and not args.sca:
+        sys.stderr.write("nenhuma configuração de regra selecionada (e --sca não foi pedido).\n")
         return 2
 
-    print(f"raptor-win: semgrep={semgrep}")
-    print(f"linguagens detectadas: {', '.join(sorted(e for e in exts if e)) or '—'}")
-    print(f"configs: {', '.join(configs)}")
+    findings: list[dict] = []
+    if configs:
+        if not semgrep:
+            sys.stderr.write(
+                "Semgrep não encontrado (necessário para a análise estática). Instale:\n"
+                "  python -m pip install semgrep\n"
+                "e garanta a pasta Scripts do Python no PATH — ou use só o SCA com --no-raptor --no-registry --sca.\n"
+            )
+            return 2
+        print(f"raptor-win: semgrep={semgrep}")
+        print(f"linguagens detectadas: {', '.join(sorted(e for e in exts if e)) or '—'}")
+        print(f"configs: {', '.join(configs)}")
+        sg = run_semgrep(semgrep, configs, targets, args.exclude)
+        if args.json_out:
+            Path(args.json_out).write_text(json.dumps(sg, indent=2), encoding="utf-8")
+        findings = collect(sg)
+        files_scanned = len(sg.get("paths", {}).get("scanned", [])) or 0
+        rules_run = len({r.get("check_id") for r in sg.get("results", [])})
+        render_console(findings, files_scanned, rules_run)
+        if args.md:
+            Path(args.md).write_text(render_markdown(findings, str(targets[0]), files_scanned, rules_run), encoding="utf-8")
+            print(f"\nMarkdown: {args.md}")
+        if args.sarif:
+            Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
+            print(f"SARIF: {args.sarif}")
 
-    sg = run_semgrep(semgrep, configs, targets, args.exclude)
-    if args.json_out:
-        Path(args.json_out).write_text(json.dumps(sg, indent=2), encoding="utf-8")
+    if args.sca:
+        render_sca(run_sca(sca_targets))
 
-    findings = collect(sg)
-    files_scanned = len(sg.get("paths", {}).get("scanned", [])) or 0
-    rules_run = len({r.get("check_id") for r in sg.get("results", [])})
-
-    render_console(findings, files_scanned, rules_run)
-    if args.md:
-        Path(args.md).write_text(render_markdown(findings, str(targets[0]), files_scanned, rules_run), encoding="utf-8")
-        print(f"\nMarkdown: {args.md}")
-    if args.sarif:
-        Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
-        print(f"SARIF: {args.sarif}")
-
-    if args.fail_on:
+    if args.fail_on and configs:
         floor = SEV_RANK[args.fail_on]
         real = [f for f in findings if "provável falso-positivo" not in f["context"]
                 and SEV_RANK.get(f["severity"], 9) <= floor]
