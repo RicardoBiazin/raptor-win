@@ -95,6 +95,31 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--raptor-rules DIR` — point at a different RAPTOR rules folder (e.g. your own RAPTOR checkout).
 - `--exclude PATTERN` — extra exclusion (repeatable). `node_modules`, `.git`, `dist`, `venv`,
   `site-packages`, `.tox`, build/cache dirs, etc. are excluded by default.
+- `--baseline [FILE]` — **accepted risks**, checked instead of just documented. Reads
+  `.raptor-baseline.toml` (or the file you name) and drops those findings from the `--fail-on`
+  count. What makes it different from a plain ignore-list:
+
+  - **`motivo` is required.** No justification means it isn't an accepted risk, it's a hidden one.
+    The scan exits 2 if an entry has no real reason.
+  - **`ate` is an expiry date.** When it passes, the finding counts again and the tool says the
+    deadline lapsed. "Deferred until the next toolchain bump" stops meaning "forever".
+  - **Orphan entries are reported** — the finding was fixed and the waiver was left behind.
+  - Accepted findings **stay in the report**, marked. Hiding them would be the same blindness the
+    file exists to prevent; it changes what *fails*, not what you *see*.
+
+  ```toml
+  [[aceito]]
+  regra  = "GHSA-qwww-vcr4-c8h2"
+  caminho = "package-lock.json"
+  motivo = "RSC Mode CSRF: this is a HashRouter SPA, no RSC and no route actions."
+  ate    = 2026-11-01
+  por    = "ricardo"
+  ```
+
+- `--sugerir-baseline` — prints a TOML template for findings not yet waived, for you to paste and
+  fill in. Deliberately *not* written straight to the file: a command that accepts everything at
+  once is a rubber stamp, and then the baseline stops meaning "someone looked".
+
 - `--fail-on {CRITICAL,ERROR,HIGH,WARNING,MEDIUM,INFO,LOW}` — non-zero exit if a real finding at/above
   that severity exists.
 

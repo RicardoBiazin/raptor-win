@@ -29,6 +29,7 @@ import sys
 import urllib.request
 from collections import Counter, defaultdict
 
+import baseline as baseline_mod
 import secrets_scan
 
 # O CONSOLE DO WINDOWS NÃO É UTF-8 POR PADRÃO. Ele abre em cp1252, que não
@@ -580,6 +581,10 @@ def main() -> int:
     ap.add_argument("--no-registry", action="store_true", help="não usar os packs do Semgrep Registry")
     ap.add_argument("--raptor-rules", metavar="DIR", help="caminho alternativo para as regras do RAPTOR")
     ap.add_argument("--exclude", action="append", default=[], help="padrão de exclusão (repetível)")
+    ap.add_argument("--baseline", metavar="FILE", nargs="?", const=baseline_mod.NOME_PADRAO,
+                    help=f"arquivo de riscos aceitos (padrao: {baseline_mod.NOME_PADRAO} se existir)")
+    ap.add_argument("--sugerir-baseline", action="store_true",
+                    help="imprime um modelo TOML para os achados ainda nao dispensados")
     ap.add_argument("--fail-on", choices=list(SEV_RANK), help="sai com código 1 se houver achado real >= esta severidade")
     args = ap.parse_args()
 
@@ -658,9 +663,34 @@ def main() -> int:
     if args.sca:
         render_sca(run_sca(sca_targets))
 
+    # RISCOS ACEITOS. Aplicado no fim, sobre a lista já completa: o
+    # baseline muda o que REPROVA, não o que é mostrado. Achado dispensado
+    # continua no relatório, marcado — sumir com ele seria a mesma cegueira
+    # que o arquivo existe para evitar.
+    alvo_baseline = args.baseline
+    if alvo_baseline is None and Path(baseline_mod.NOME_PADRAO).exists():
+        alvo_baseline = baseline_mod.NOME_PADRAO
+    if alvo_baseline:
+        cam = Path(alvo_baseline)
+        if not cam.exists():
+            print(f"baseline não encontrado: {cam}", file=sys.stderr)
+            return 2
+        try:
+            entradas = baseline_mod.carregar(cam)
+        except baseline_mod.ErroBaseline as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        findings, resumo = baseline_mod.aplicar(findings, entradas)
+        baseline_mod.render(resumo)
+
+    if args.sugerir_baseline:
+        print()
+        print(baseline_mod.prox_de_aceitar(findings))
+
     if args.fail_on and (configs or args.secrets):
         floor = SEV_RANK[args.fail_on]
         real = [f for f in findings if "provável falso-positivo" not in f["context"]
+                and not f.get("aceito")
                 and SEV_RANK.get(f["severity"], 9) <= floor]
         if real:
             print(f"\nfail-on={args.fail_on}: {len(real)} achado(s) real(is) >= {args.fail_on}.")

@@ -55,3 +55,35 @@ jobs:
           python raptor_win.py . --secrets --no-raptor --no-registry > self.txt 2>&1 || true
           cat self.txt
           grep -q 'Nenhuma credencial exposta' self.txt
+      - name: Baseline de riscos aceitos
+        run: |
+          # Três comportamentos: dispensa o que tem motivo, faz voltar o
+          # que venceu, e avisa da entrada que não casa com nada.
+          {
+            echo '[[aceito]]'
+            echo 'regra  = "github-token"'
+            echo 'motivo = "Fixture do smoke test; o token e falso."'
+            echo 'ate    = 2027-01-01'
+            echo '[[aceito]]'
+            echo 'regra  = "conexao-com-senha"'
+            echo 'motivo = "Fixture do smoke test; a senha e falsa."'
+            echo 'ate    = 2020-01-01'
+            echo '[[aceito]]'
+            echo 'regra  = "regra-inexistente"'
+            echo 'motivo = "Entrada obsoleta, deve ser reportada como orfa."'
+          } > /tmp/base.toml
+          python raptor_win.py /tmp/segredos --secrets --no-raptor --no-registry \
+            --baseline /tmp/base.toml > base.txt 2>&1 || true
+          cat base.txt
+          grep -q 'dispensados'                    base.txt   # aceite válido
+          grep -q 'VENCEU'                         base.txt   # prazo expirado volta a contar
+          grep -q 'entrada sem achado'             base.txt   # órfã reportada
+      - name: Baseline sem motivo é recusado
+        run: |
+          # Sem justificativa não é aceite de risco, é ocultação.
+          printf '[[aceito]]\nregra = "x"\nmotivo = "ha"\n' > /tmp/ruim.toml
+          if python raptor_win.py /tmp/segredos --secrets --no-raptor --no-registry \
+               --baseline /tmp/ruim.toml > ruim.txt 2>&1; then
+            echo "ERRO: aceitou baseline sem motivo"; cat ruim.txt; exit 1
+          fi
+          grep -q 'motivo' ruim.txt
