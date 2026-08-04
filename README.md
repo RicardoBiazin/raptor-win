@@ -88,6 +88,25 @@ python raptor_win.py . --changed origin/main --sarif results.sarif --fail-on HIG
 # then, in GitHub Actions:  uses: github/codeql-action/upload-sarif  with: sarif_file: results.sarif
 ```
 
+## Scan many projects at once (`scan-all.ps1`)
+
+To scan **every project under a folder** (each subdirectory = one project) and get a combined
+report — ideal for a scheduled/recurring security sweep on Windows:
+
+```powershell
+.\scan-all.ps1 -Base C:\DEV
+```
+
+It runs SAST + SCA per project, writes `*.sast.md` and `*.log.txt` per project plus a combined
+`RESUMO.md` under `C:\DEV\_raptor-reports\<timestamp>\`. It **only verifies and reports** — it never
+changes code or pushes (that stays a human decision after reviewing the report). Schedule it, e.g.,
+weekly, with Windows Task Scheduler:
+
+```powershell
+schtasks /create /tn "raptor-win weekly" /sc weekly /d MON /st 09:00 /f `
+  /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\DEV\raptor-win\scan-all.ps1 -Base C:\DEV"
+```
+
 ## Triage built in
 
 Taint findings (SSRF / path-traversal / injection) inside **tests, scripts and tooling** are tagged
