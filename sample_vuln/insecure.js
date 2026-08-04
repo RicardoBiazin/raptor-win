@@ -1,4 +1,4 @@
-// Fixture PROPOSITALMENTE vulnerável — usada só pelo smoke test do CI.
+// Amostra PROPOSITALMENTE vulnerável — usada só pelo smoke test do CI.
 const express = require('express')
 const app = express()
 
