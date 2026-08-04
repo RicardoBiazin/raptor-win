@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -60,6 +61,9 @@ SKIP_DIRS = {
 # Severity ordering (Semgrep uses ERROR/WARNING/INFO; registry rules also emit
 # CRITICAL/HIGH/MEDIUM/LOW in extra.severity/metadata).
 SEV_RANK = {"CRITICAL": 0, "ERROR": 1, "HIGH": 2, "WARNING": 3, "MEDIUM": 4, "INFO": 5, "LOW": 6}
+# Map to SARIF levels (GitHub Code Scanning understands error/warning/note).
+SARIF_LEVEL = {"CRITICAL": "error", "ERROR": "error", "HIGH": "error",
+               "WARNING": "warning", "MEDIUM": "warning", "INFO": "note", "LOW": "note"}
 
 # Paths that are dev tooling / tests — taint findings there are usually false
 # positives (they hit *your own* known endpoints/paths, not attacker input).
@@ -257,6 +261,63 @@ def render_markdown(findings: list[dict], target: str, files_scanned: int, rules
     return "\n".join(lines)
 
 
+def to_sarif(findings: list[dict]) -> dict:
+    """SARIF 2.1.0 mínimo e válido — pronto para o GitHub Code Scanning."""
+    rules: dict[str, dict] = {}
+    results = []
+    for f in findings:
+        rid = f["rule"]
+        rules.setdefault(rid, {"id": rid, "shortDescription": {"text": short_rule(rid)}})
+        try:
+            uri = os.path.relpath(f["path"]).replace("\\", "/")
+        except ValueError:
+            uri = f["path"].replace("\\", "/")
+        results.append({
+            "ruleId": rid,
+            "level": SARIF_LEVEL.get(f["severity"], "warning"),
+            "message": {"text": f["message"] or short_rule(rid)},
+            "locations": [{"physicalLocation": {
+                "artifactLocation": {"uri": uri},
+                "region": {"startLine": max(1, int(f["line"] or 1))},
+            }}],
+        })
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "raptor-win",
+                "informationUri": "https://github.com/RicardoBiazin/raptor-win",
+                "rules": list(rules.values()),
+            }},
+            "results": results,
+        }],
+    }
+
+
+def changed_files(target: Path, ref: str) -> "list[Path] | None":
+    """Arquivos alterados desde `ref` (git). None = git indisponível/não é repo."""
+    root = target if target.is_dir() else target.parent
+    try:
+        top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    if top.returncode != 0:
+        return None
+    base = Path(top.stdout.strip())
+    diff = subprocess.run(["git", "-C", str(base), "diff", "--name-only", ref],
+                          capture_output=True, text=True)
+    if diff.returncode != 0:
+        return None
+    files = []
+    for line in diff.stdout.splitlines():
+        p = (base / line).resolve()
+        if p.is_file() and str(p).startswith(str(target)):
+            files.append(p)
+    return files
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="raptor-win",
@@ -264,7 +325,9 @@ def main() -> int:
     )
     ap.add_argument("target", nargs="+", help="pasta(s) ou arquivo(s) a escanear")
     ap.add_argument("--md", metavar="FILE", help="escreve relatório Markdown")
+    ap.add_argument("--sarif", metavar="FILE", help="escreve SARIF 2.1.0 (upload no GitHub Code Scanning)")
     ap.add_argument("--json-out", metavar="FILE", help="escreve o JSON bruto do Semgrep")
+    ap.add_argument("--changed", metavar="REF", help="escanear só arquivos alterados desde <ref> git (ex.: origin/main)")
     ap.add_argument("--no-raptor", action="store_true", help="não usar as regras do RAPTOR")
     ap.add_argument("--no-registry", action="store_true", help="não usar os packs do Semgrep Registry")
     ap.add_argument("--raptor-rules", metavar="DIR", help="caminho alternativo para as regras do RAPTOR")
@@ -286,6 +349,17 @@ def main() -> int:
         if not t.exists():
             sys.stderr.write(f"alvo inexistente: {t}\n")
             return 2
+
+    if args.changed:
+        cf = changed_files(targets[0], args.changed)
+        if cf is None:
+            sys.stderr.write("--changed: git indisponível ou o alvo não é um repositório git.\n")
+            return 2
+        if not cf:
+            print(f"Nenhum arquivo alterado desde {args.changed}. Nada a escanear. ✅")
+            return 0
+        targets = cf
+        print(f"modo --changed: {len(targets)} arquivo(s) alterado(s) desde {args.changed}")
 
     raptor_rules = Path(args.raptor_rules).resolve() if args.raptor_rules else RAPTOR_RULES
     exts = detect_languages(targets)
@@ -310,6 +384,9 @@ def main() -> int:
     if args.md:
         Path(args.md).write_text(render_markdown(findings, str(targets[0]), files_scanned, rules_run), encoding="utf-8")
         print(f"\nMarkdown: {args.md}")
+    if args.sarif:
+        Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
+        print(f"SARIF: {args.sarif}")
 
     if args.fail_on:
         floor = SEV_RANK[args.fail_on]

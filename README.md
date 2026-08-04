@@ -62,13 +62,25 @@ Windows launcher (puts `semgrep` on PATH automatically):
 ### Options
 
 - `--md FILE` — write a Markdown report.
+- `--sarif FILE` — write a SARIF 2.1.0 report you can upload to **GitHub Code Scanning**
+  (`github/codeql-action/upload-sarif`), so findings show up in the repo's Security tab.
 - `--json-out FILE` — write Semgrep's raw JSON.
+- `--changed REF` — scan **only files changed since a git ref** (e.g. `origin/main`). Perfect for
+  pull-request / CI gating: fast, and it fails only on *new* problems.
 - `--no-raptor` / `--no-registry` — drop one of the rule sources.
 - `--raptor-rules DIR` — point at a different RAPTOR rules folder (e.g. your own RAPTOR checkout).
-- `--exclude PATTERN` — extra exclusion (repeatable). `node_modules`, `.git`, `dist`, `venv`, etc.
-  are excluded by default.
+- `--exclude PATTERN` — extra exclusion (repeatable). `node_modules`, `.git`, `dist`, `venv`,
+  `site-packages`, `.tox`, build/cache dirs, etc. are excluded by default.
 - `--fail-on {CRITICAL,ERROR,HIGH,WARNING,MEDIUM,INFO,LOW}` — non-zero exit if a real finding at/above
   that severity exists.
+
+### In CI (pull-request gate)
+
+```bash
+# scan only what changed in the PR, emit SARIF, fail on HIGH+
+python raptor_win.py . --changed origin/main --sarif results.sarif --fail-on HIGH
+# then, in GitHub Actions:  uses: github/codeql-action/upload-sarif  with: sarif_file: results.sarif
+```
 
 ## Triage built in
 
