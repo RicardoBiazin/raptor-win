@@ -32,12 +32,9 @@ jobs:
           # Fixture: um .env com senha, FORA do .gitignore — o cenário que
           # a checagem de exposição existe para pegar antes de virar commit.
           mkdir -p /tmp/segredos && cd /tmp/segredos && git init -q
-          printf 'node_modules
-' > .gitignore
-          printf 'DB=postgresql://u:S3nh4Real9@host:5432/db
-' > .env
-          printf 'const t = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
-' > app.js
+          echo 'node_modules' > .gitignore
+          echo 'DB=postgresql://u:S3nh4Real9@host:5432/db' > .env
+          echo 'const t = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";' > app.js
           cd - >/dev/null
           python raptor_win.py /tmp/segredos --secrets --no-raptor --no-registry > sec.txt 2>&1 || true
           cat sec.txt
