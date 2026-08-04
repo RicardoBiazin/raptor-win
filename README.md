@@ -23,9 +23,10 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 |------|---------|
 | Static analysis (Semgrep) | Run/execute any target code |
 | RAPTOR rules + Registry packs (auto by language) | Fuzzing, binary analysis, `rr` |
-| De-dup, severity triage, tooling/test heuristic | Generate exploits or patches |
-| Console + Markdown + raw JSON report | Need a sandbox (it never executes code) |
-| CI-friendly exit codes (`--fail-on`) | — |
+| **Dependency scanning (SCA) via OSV.dev** (`--sca`) | Generate exploits or patches |
+| De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
+| Console + Markdown + **SARIF** + raw JSON report | — |
+| Diff mode (`--changed`) + CI exit codes (`--fail-on`) | — |
 
 ## Install
 
@@ -67,6 +68,9 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--json-out FILE` — write Semgrep's raw JSON.
 - `--changed REF` — scan **only files changed since a git ref** (e.g. `origin/main`). Perfect for
   pull-request / CI gating: fast, and it fails only on *new* problems.
+- `--sca` — also run **dependency scanning (SCA)**: parses `requirements.txt` and `package-lock.json`,
+  queries **OSV.dev** (free, no key) and reports known CVEs per package, with the fixed version and a
+  link. Runs standalone too (`--sca --no-registry --no-raptor` = SCA only, no Semgrep needed).
 - `--no-raptor` / `--no-registry` — drop one of the rule sources.
 - `--raptor-rules DIR` — point at a different RAPTOR rules folder (e.g. your own RAPTOR checkout).
 - `--exclude PATTERN` — extra exclusion (repeatable). `node_modules`, `.git`, `dist`, `venv`,
