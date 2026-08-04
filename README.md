@@ -68,9 +68,11 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--json-out FILE` — write Semgrep's raw JSON.
 - `--changed REF` — scan **only files changed since a git ref** (e.g. `origin/main`). Perfect for
   pull-request / CI gating: fast, and it fails only on *new* problems.
-- `--sca` — also run **dependency scanning (SCA)**: parses `requirements.txt` and `package-lock.json`,
-  queries **OSV.dev** (free, no key) and reports known CVEs per package, with the fixed version and a
-  link. Runs standalone too (`--sca --no-registry --no-raptor` = SCA only, no Semgrep needed).
+- `--sca` — also run **dependency scanning (SCA)**: parses `requirements.txt`, `package-lock.json`,
+  `poetry.lock`, `Pipfile.lock`, **and enumerates packages actually installed in a project's `.venv`**
+  (so unpinned `requirements.txt` still gets checked), then queries **OSV.dev** (free, no key) and
+  reports known CVEs per package, with the fixed version and a link. Runs standalone too
+  (`--sca --no-registry --no-raptor` = SCA only, no Semgrep needed).
 - `--no-raptor` / `--no-registry` — drop one of the rule sources.
 - `--raptor-rules DIR` — point at a different RAPTOR rules folder (e.g. your own RAPTOR checkout).
 - `--exclude PATTERN` — extra exclusion (repeatable). `node_modules`, `.git`, `dist`, `venv`,

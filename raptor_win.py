@@ -322,8 +322,8 @@ def changed_files(target: Path, ref: str) -> "list[Path] | None":
 # ── SCA (Software Composition Analysis) via OSV.dev — só stdlib, sem chave ──────
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 OSV_VULN = "https://api.osv.dev/v1/vulns/"
-SCA_MANIFESTS = ("requirements.txt", "package-lock.json")
-SCA_DETAIL_CAP = 80  # nº máx. de detalhes de vuln buscados (evita floods)
+SCA_MANIFESTS = ("requirements.txt", "package-lock.json", "poetry.lock", "Pipfile.lock")
+SCA_DETAIL_CAP = 120  # nº máx. de detalhes de vuln buscados (evita floods)
 
 
 def find_manifests(targets: list[Path]) -> list[Path]:
@@ -375,6 +375,48 @@ def parse_package_lock(path: Path) -> list[tuple[str, str, str]]:
     return sorted(out)
 
 
+def parse_poetry_lock(path: Path) -> list[tuple[str, str, str]]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    out = []
+    for block in text.split("[[package]]")[1:]:
+        n = re.search(r'name\s*=\s*"([^"]+)"', block)
+        v = re.search(r'version\s*=\s*"([^"]+)"', block)
+        if n and v:
+            out.append(("PyPI", n.group(1), v.group(1)))
+    return out
+
+
+def parse_pipfile_lock(path: Path) -> list[tuple[str, str, str]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    out = []
+    for sect in ("default", "develop"):
+        for name, meta in (data.get(sect) or {}).items():
+            m = re.match(r"==\s*([\w.\-+!]+)", str((meta or {}).get("version", "")))
+            if m:
+                out.append(("PyPI", name, m.group(1)))
+    return out
+
+
+def enumerate_venv(target: Path) -> list[tuple[str, str, str]]:
+    """Pacotes REALMENTE instalados num .venv/venv sob o alvo (via *.dist-info) —
+    cobre projetos com requirements.txt sem versão pinada."""
+    out: list[tuple[str, str, str]] = []
+    venvs: list[Path] = []
+    for name in (".venv", "venv"):
+        venvs += [p for p in list(target.glob(name)) + list(target.glob("*/" + name)) if p.is_dir()]
+    for vd in venvs:
+        sps = list(vd.glob("Lib/site-packages")) + list(vd.glob("lib/*/site-packages"))
+        for sp in sps:
+            for di in sp.glob("*.dist-info"):
+                m = re.match(r"^(.+)-([^-]+)\.dist-info$", di.name)
+                if m:
+                    out.append(("PyPI", m.group(1).replace("_", "-"), m.group(2)))
+    return out
+
+
 def _osv_severity(v: dict) -> str:
     ds = (v.get("database_specific") or {}).get("severity")
     if ds:
@@ -401,14 +443,28 @@ def _osv_fixed(v: dict) -> str:
 
 def run_sca(targets: list[Path]) -> "dict | None":
     manifests = find_manifests(targets)
+    parsers = {
+        "requirements.txt": parse_requirements, "package-lock.json": parse_package_lock,
+        "poetry.lock": parse_poetry_lock, "Pipfile.lock": parse_pipfile_lock,
+    }
     deps: list[tuple[str, str, str]] = []
+    sources: list[str] = []
     for m in manifests:
-        deps += parse_requirements(m) if m.name == "requirements.txt" else parse_package_lock(m)
+        got = parsers[m.name](m)
+        if got:
+            deps += got
+            sources.append(m.name)
+    for t in targets:  # pacotes instalados em .venv (cobre requirements sem pin)
+        if t.is_dir():
+            venv_deps = enumerate_venv(t)
+            if venv_deps:
+                deps += venv_deps
+                sources.append(".venv (instalados)")
     # dedup preservando ordem
     seen: set = set()
     deps = [d for d in deps if not (d in seen or seen.add(d))]
     if not deps:
-        return {"manifests": manifests, "deps": 0, "vulns": {}}
+        return {"sources": sources, "deps": 0, "vulns": {}}
     queries = [{"package": {"name": n, "ecosystem": e}, "version": v} for (e, n, v) in deps]
     hits: dict[tuple, list[str]] = {}
     try:
@@ -422,7 +478,7 @@ def run_sca(targets: list[Path]) -> "dict | None":
                 if ids:
                     hits[dep] = ids
     except Exception as ex:
-        return {"error": str(ex), "manifests": manifests, "deps": len(deps)}
+        return {"error": str(ex), "sources": sources, "deps": len(deps)}
     # busca detalhes (limitada) para severidade/summary/fix
     details: dict[str, dict] = {}
     uniq = [vid for ids in hits.values() for vid in ids]
@@ -432,7 +488,7 @@ def run_sca(targets: list[Path]) -> "dict | None":
                 details[vid] = json.loads(r.read())
         except Exception:
             details[vid] = {}
-    return {"manifests": manifests, "deps": len(deps), "vulns": hits, "details": details}
+    return {"sources": sources, "deps": len(deps), "vulns": hits, "details": details}
 
 
 def render_sca(sca: dict) -> None:
@@ -442,8 +498,8 @@ def render_sca(sca: dict) -> None:
     if sca.get("error"):
         print(f" ⚠ OSV indisponível ({sca['error']}). {sca.get('deps', 0)} dependência(s) não checada(s).")
         return
-    mans = sca.get("manifests", [])
-    print(f" manifests: {', '.join(m.name for m in mans) or '—'}  ·  dependências pinadas: {sca.get('deps', 0)}")
+    srcs = sca.get("sources", [])
+    print(f" fontes: {', '.join(dict.fromkeys(srcs)) or '—'}  ·  dependências verificadas: {sca.get('deps', 0)}")
     hits = sca.get("vulns", {})
     if not hits:
         print(" Nenhuma dependência vulnerável conhecida. ✅")
