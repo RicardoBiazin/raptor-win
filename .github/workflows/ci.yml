@@ -27,6 +27,56 @@ jobs:
           echo '--- report ---'; cat report.md
           # o scanner tem de ter achado ao menos uma vulnerabilidade nas amostras
           grep -Eq 'CRITICAL|ERROR|HIGH|WARNING' report.md
+      - name: As regras do registro precisam ter carregado
+        run: |
+          # O passo anterior passa mesmo se NENHUM pacote do registro
+          # baixar: as regras locais em rules/raptor sozinhas já acham
+          # coisa nas amostras. Quando o registro cai — rede, mudança de
+          # nome de pacote, indisponibilidade —, o Semgrep devolve JSON
+          # válido com zero resultados e o relatório dizia "Nenhum achado
+          # ✅". Um scanner que responde "está limpo" quando não analisou
+          # é pior que scanner nenhum: gera confiança onde não houve
+          # verificação.
+          #
+          # Com --no-raptor só o registro pode disparar. Se não achar
+          # nada aqui, ou o registro não carregou ou as amostras pararam
+          # de casar com ele — os dois merecem falhar a build.
+          python raptor_win.py sample_vuln --no-raptor --md registro.md
+          echo '--- registro ---'; cat registro.md
+          grep -Eq 'CRITICAL|ERROR|HIGH|WARNING' registro.md
+
+      - name: Erro do Semgrep não pode virar relatório limpo
+        run: |
+          # Quando uma configuração falha, o Semgrep devolve JSON VÁLIDO
+          # com results:[] e o motivo em errors[]. A ferramenta tem de
+          # RECUSAR o relatório, não imprimir "Nenhum achado ✅".
+          #
+          # A falha é provocada por uma regra local inválida, e não por um
+          # pacote inexistente do registro: assim o teste não depende de
+          # rede nem de o registro devolver 404 para sempre. O caminho de
+          # código exercitado é o mesmo — errors[] com level "error".
+          mkdir -p /tmp/regras-ruins /tmp/alvo
+          printf 'rules:\n  - id: sem-message\n    pattern: $X\n' > /tmp/regras-ruins/r.yaml
+          echo 'const a = 1' > /tmp/alvo/a.js
+          if python raptor_win.py /tmp/alvo --no-registry \
+               --raptor-rules /tmp/regras-ruins > falho.txt 2>&1; then
+            echo "ERRO: relatou sucesso apesar do erro do Semgrep"; cat falho.txt; exit 1
+          fi
+          cat falho.txt
+          grep -q 'NÃO é confiável' falho.txt
+
+      - name: Arquivo ilegível NÃO derruba a análise
+        run: |
+          # A guarda acima não pode ser larga demais. Medido antes de
+          # escrevê-la: fonte com sintaxe inválida não entra em errors[],
+          # o Semgrep a ignora. Este passo trava esse comportamento — sem
+          # ele, um .js minificado no repositório quebraria a build de
+          # quem usa a ferramenta.
+          mkdir -p /tmp/alvo2
+          printf 'function x( {\n  return\n' > /tmp/alvo2/quebrado.js
+          echo 'const ok = 1' >> /tmp/alvo2/bom.js
+          python raptor_win.py /tmp/alvo2 --no-registry
+
       - name: Smoke da varredura de credenciais
         run: |
           # Fixture: um .env com senha, FORA do .gitignore — o cenário que

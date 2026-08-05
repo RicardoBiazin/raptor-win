@@ -253,7 +253,11 @@ def render_console(findings: list[dict], files_scanned: int, rules_run: int) -> 
     print(" raptor-win — relatório SAST")
     print("=" * 62)
     print(f" arquivos escaneados : {files_scanned}")
-    print(f" regras executadas   : {rules_run}")
+    # "regras COM ACHADO", não "executadas": este número conta check_ids
+    # distintos entre os resultados. Rotulado como "executadas" ele dizia
+    # sempre 0 num scan limpo, sugerindo que nada tinha rodado — e, pior,
+    # não distinguia isso de um scan em que realmente nada rodou.
+    print(f" regras com achado   : {rules_run}")
     order = sorted(by_sev, key=lambda s: SEV_RANK.get(s, 9))
     print(" achados por severidade: " + (", ".join(f"{s}={by_sev[s]}" for s in order) or "0"))
     real = [f for f in findings if "provável falso-positivo" not in f["context"]]
@@ -288,7 +292,7 @@ def render_markdown(findings: list[dict], target: str, files_scanned: int, rules
         f"- **Alvo:** `{target}`",
         f"- **Gerado em:** {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         f"- **Arquivos escaneados:** {files_scanned}",
-        f"- **Regras executadas:** {rules_run}",
+        f"- **Regras com achado:** {rules_run}",
         f"- **Achados:** {len(findings)} (" + (", ".join(f"{s}: {by_sev[s]}" for s in order) or "0") + ")",
         "",
         "| Sev | Regra | Local | Contexto |",
@@ -659,6 +663,32 @@ def main() -> int:
         findings = collect(sg)
         files_scanned = len(sg.get("paths", {}).get("scanned", [])) or 0
         rules_run = len({r.get("check_id") for r in sg.get("results", [])})
+
+        # ERROS DO SEMGREP SÃO FATAIS, e não uma nota de rodapé.
+        #
+        # Quando um pacote do registro não pode ser baixado, o Semgrep
+        # devolve JSON VÁLIDO com `results: []` e registra o 404 em
+        # `errors[]` com `level: "error"`. O relatório, sem isto,
+        # imprimia "Nenhum achado ✅" — indistinguível de código limpo, e
+        # pior que erro nenhum, porque produz confiança onde não houve
+        # análise.
+        #
+        # Só `level == "error"` derruba. Medido antes de escrever: um
+        # arquivo-fonte com sintaxe inválida NÃO entra em `errors[]` (o
+        # Semgrep o ignora em silêncio), então isto não transforma um
+        # .js minificado no meio do repositório em build quebrada. O que
+        # sobra em nível de aviso segue como aviso.
+        erros = [e for e in sg.get("errors", [])
+                 if e and str(e.get("level", "error")).lower() == "error"]
+        if erros:
+            sys.stderr.write("\nO Semgrep relatou erros — a análise NÃO é confiável:\n")
+            for e in erros[:10]:
+                msg = e.get("long_msg") or e.get("message") or json.dumps(e)
+                sys.stderr.write(f"  · {str(msg)[:300]}\n")
+            sys.stderr.write(
+                "\nUm relatório vazio aqui significaria 'não analisei', não 'está limpo'.\n")
+            return 2
+
         render_console(findings, files_scanned, rules_run)
         if args.md:
             Path(args.md).write_text(render_markdown(findings, str(targets[0]), files_scanned, rules_run), encoding="utf-8")
