@@ -179,9 +179,33 @@ def run_semgrep(semgrep: str, configs: list[str], targets: list[Path], excludes:
     for ex in excludes:
         cmd += ["--exclude", ex]
     cmd += [str(t) for t in targets]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    # `semgrep.exe` é um invólucro: ele localiza as regras e delega a
+    # análise a `pysemgrep`, que invoca PELO NOME PURO. Quando o pip
+    # instalou em `%APPDATA%\Python\PythonXXX\Scripts` sem acrescentar
+    # esse diretório ao PATH — o padrão no Windows —, `find_semgrep()`
+    # acha o executável por caminho absoluto, roda, e o processo FILHO
+    # falha com "pysemgrep: No such file or directory". O erro cita um
+    # programa que o usuário nunca chamou e que está instalado, ao lado
+    # do que funcionou; é difícil de ler e não sugere a causa.
+    #
+    # Basta pôr no PATH do subprocesso o diretório de onde o próprio
+    # semgrep veio: quem está ali é exatamente o par que falta.
+    env = os.environ.copy()
+    pasta = str(Path(semgrep).parent)
+    if pasta and pasta not in env.get("PATH", "").split(os.pathsep):
+        env["PATH"] = pasta + os.pathsep + env.get("PATH", "")
+
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=env)
     if not proc.stdout.strip():
         sys.stderr.write(proc.stderr or "semgrep produced no output\n")
+        if "pysemgrep" in (proc.stderr or ""):
+            sys.stderr.write(
+                f"\nDica: o semgrep foi encontrado em {pasta}, mas o componente\n"
+                "pysemgrep não. Confira se os dois estão nessa pasta:\n"
+                "  python -m pip install --force-reinstall semgrep\n",
+            )
         raise SystemExit(2)
     return json.loads(proc.stdout)
 
