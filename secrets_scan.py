@@ -51,6 +51,9 @@ SEGREDO_NO_NOME_RE = re.compile(
 # Exemplos e modelos são feitos para ser versionados.
 MODELO_RE = re.compile(r"(\.example$|\.sample$|\.template$|\.dist$)", re.I)
 
+# Arquivo de ambiente, qualquer sufixo: .env, .env.demo, .env.local, .env.ci…
+ENV_RE = re.compile(r"(^|[\\/])\.env(\..+)?$", re.I)
+
 # Valores que parecem credencial mas são espaço reservado.
 PLACEHOLDER_RE = re.compile(
     r"^(x{3,}|\.{3,}|senha|sua[-_]?senha|your[-_].*|my[-_].*|change[-_]?me|"
@@ -120,6 +123,44 @@ def _linha_de(texto: str, pos: int) -> int:
     return texto.count("\n", 0, pos) + 1
 
 
+def _ler(arquivo: Path) -> str | None:
+    try:
+        return arquivo.read_text(encoding="utf-8", errors="strict")
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
+def _env_tem_credencial(texto: str) -> bool:
+    """Algum valor deste arquivo de ambiente parece credencial?
+
+    Existe para calibrar a severidade do aviso de `.env` versionado, sem
+    desligá-lo. A convenção de nome de modelo não é uma só: além de
+    `.env.example`, projetos usam `.env.demo`, `.env.local`, `.env.ci` — e
+    julgar pelo nome erra nos dois sentidos, deixando passar um `.env.prod`
+    cheio de chave real e acusando um `.env.demo` que só tem `MARCA=PDV Demo`.
+
+    O aviso preventivo continua, porque a razão dele é o FUTURO ("vai vazar no
+    próximo `git add -A`"). Mas um arquivo que hoje não tem segredo nenhum não
+    pode competir em severidade com uma chave de verdade exposta.
+    """
+    for linha in texto.splitlines():
+        linha = linha.strip()
+        if not linha or linha.startswith("#") or "=" not in linha:
+            continue
+        valor = linha.split("=", 1)[1].strip().strip("\"'")
+        if not valor or PLACEHOLDER_RE.match(valor):
+            continue
+        if any(r.re.search(valor) for r in REGRAS):
+            return True
+        # Sem prefixo conhecido: entropia é o que separa credencial de
+        # configuração. "PDV Demo", "logo-pdv.svg", "1" não são segredo;
+        # cadeia longa misturando maiúscula e dígito, provavelmente sim.
+        if len(valor) >= 20 and any(c.isdigit() for c in valor) \
+                and any(c.isupper() for c in valor) and " " not in valor:
+            return True
+    return False
+
+
 def _ignorado_pelo_git(raiz: Path, arquivo: Path) -> bool | None:
     """O git ignora este arquivo? None quando não há git para perguntar."""
     try:
@@ -178,19 +219,33 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
 
         modelo = bool(MODELO_RE.search(rel_norm))
 
+        # Arquivo de ambiente versionado, mas sem nenhum valor que pareça
+        # credencial: o aviso continua (preventivo), com severidade honesta.
+        # Ver _env_tem_credencial().
+        env_sem_segredo = False
+        if not modelo and ENV_RE.search(rel_norm):
+            texto_env = _ler(arq)
+            if texto_env is not None and not _env_tem_credencial(texto_env):
+                env_sem_segredo = True
+
         # --- 1. arquivo de segredo desprotegido -------------------------
         if SEGREDO_NO_NOME_RE.search(rel_norm) and not modelo:
             if tem_git and _ignorado_pelo_git(raiz, arq) is False:
                 achados.append({
                     "rule": "secrets.arquivo-nao-ignorado",
-                    "severity": "HIGH",
+                    "severity": "INFO" if env_sem_segredo else "HIGH",
                     "path": rel_norm,
                     "line": 0,
                     "message": (
+                        "Arquivo de ambiente versionado. Hoje não há credencial "
+                        "nele, então não houve vazamento — mas se um segredo for "
+                        "escrito aqui, entra no histórico no próximo commit. "
+                        "Se é modelo, o nome `.env.example` deixa isso explícito."
+                        if env_sem_segredo else
                         "Arquivo de credenciais NÃO está no .gitignore. Ainda não "
                         "vazou, mas vai no próximo `git add -A` — e o que entra no "
                         "histórico só se corrige rotacionando a credencial."),
-                    "context": "",
+                    "context": "sem credencial no conteúdo" if env_sem_segredo else "",
                 })
 
         # Conteúdo de arquivo de segredo já ignorado não é achado: ele

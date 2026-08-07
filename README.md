@@ -152,10 +152,29 @@ schtasks /create /tn "raptor-win weekly" /sc weekly /d MON /st 09:00 /f `
 
 ## Triage built in
 
-Taint findings (SSRF / path-traversal / injection) inside **tests, scripts and tooling** are tagged
-*"provável falso-positivo"* — those paths usually reach *your own* known endpoints/paths, not
-attacker-controlled input, so they are rarely exploitable. Findings outside tooling are what you
-should confirm first. Static analysis reports *possibilities*; you still validate exploitability.
+The console prints `total: N · exigem atenção: M` — *M* is what needs a human decision. Three
+classes are separated:
+
+| Class | Counts toward "exigem atenção"? | Why |
+|---|---|---|
+| Taint (SSRF / path-traversal / injection) inside **tests, scripts, tooling** | No | Those paths reach *your own* known endpoints, not attacker input |
+| Any finding inside a **deliberately-vulnerable fixture** (`sample_vuln/`, `vuln_samples/`, …) | No | The flaw is the file's expected content — a scanner ships these to prove it detects |
+| Anything else in test/tooling code (weak hash, `shell=True`, …) | **Yes** | Test code runs for real, on dev machines and in CI |
+
+Nothing is hidden: every finding stays in the report with its severity and its label. Only the
+counter changes.
+
+Test paths are recognised in **English and Portuguese** — `tests/`, `testes/`, `test_foo.py`,
+`teste_foo.py`, `foo_test.py`, `foo_teste.py`, `foo.spec.ts`. A verb like `testar_conexao.py`
+("to test") is *not* treated as a test file.
+
+For secret files, severity follows the **content**, not the filename: a versioned `.env.demo`
+holding only `MARCA=PDV Demo` is reported at `INFO` (the warning still fires — a secret written
+there tomorrow lands in history), while the same file holding a real key is `HIGH`. Naming
+conventions for templates vary (`.env.demo`, `.env.local`, `.env.ci`), and judging by name is
+wrong in both directions.
+
+Static analysis reports *possibilities*; you still validate exploitability.
 
 ## Credits & licence
 

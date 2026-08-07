@@ -87,14 +87,44 @@ SARIF_LEVEL = {"CRITICAL": "error", "ERROR": "error", "HIGH": "error",
 
 # Paths that are dev tooling / tests — taint findings there are usually false
 # positives (they hit *your own* known endpoints/paths, not attacker input).
+#
+# Duas lacunas medidas em repositórios reais e fechadas aqui:
+#
+#   1. NOME DE TESTE EM PORTUGUÊS. `tests?` casa "test/" e "tests/", não
+#      "teste/"/"testes/", e a regra de nome de arquivo exigia ponto logo depois
+#      ("app.test.ts"), então `teste_injecao.py` era contado como código de
+#      produção. Em base escrita em português isso não é exceção, é o padrão.
+#
+#   2. AMOSTRA DELIBERADAMENTE VULNERÁVEL. Um scanner de segurança carrega
+#      fixtures com falhas plantadas para provar que detecta. `fixtures/` já
+#      estava coberto; `sample_vuln/` — o nome que o próprio raptor-win usa —
+#      não estava, e a ferramenta acusava a si mesma como se fosse código real.
 TOOLING_RE = re.compile(
-    r"(^|[\\/])(tests?|spec|specs|__tests__|scripts?|tools?|examples?|fixtures?|e2e|benchmarks?|migrations?)([\\/]|$)"
+    r"(^|[\\/])(tests?|testes?|spec|specs|__tests__|scripts?|tools?|examples?"
+    r"|fixtures?|e2e|benchmarks?|migrations?|testdata|test[_-]data)([\\/]|$)"
     # scripts/tests/migrations do supabase/ — MENOS as Edge Functions, que são runtime
     r"|(^|[\\/])supabase[\\/](?!functions[\\/])"
+    # prefixo de arquivo de teste: test_foo.py, teste_foo.py, spec-foo.js
+    r"|(^|[\\/])(test|teste|spec|pentest)[_-]"
+    # sufixo de arquivo de teste: foo_test.py, foo_teste.py, foo-spec.js
+    r"|[_-](test|teste|spec)s?\."
     r"|(test|spec|pentest|verificar|verify|conferir|doctor|smoke|sessao|session|validar|sincroniz|sync|migrar|preparar|diagnostico|seed|stamp)\.",
     re.IGNORECASE,
 )
 TAINT_CATEGORIES = ("ssrf", "path_traversal", "path-traversal", "injection", "traversal")
+
+# Amostra com vulnerabilidade PLANTADA de propósito.
+#
+# Diferente de código de teste, que roda de verdade e cujos achados ainda podem
+# valer atenção: aqui a falha é o conteúdo esperado do arquivo. Um scanner de
+# segurança carrega fixtures assim para provar que detecta — o próprio raptor-win
+# tem `sample_vuln/` — e acusá-las como problema faz a ferramenta se auto-reportar
+# e enche o relatório de ruído que ninguém pode corrigir.
+FIXTURE_VULN_RE = re.compile(
+    r"(^|[\\/])(sample[_-]?vulns?|vuln[_-]?samples?|vulnerable[_-]?samples?"
+    r"|insecure[_-]?samples?)([\\/]|$)",
+    re.IGNORECASE,
+)
 
 
 def find_semgrep() -> str | None:
@@ -211,6 +241,8 @@ def run_semgrep(semgrep: str, configs: list[str], targets: list[Path], excludes:
 
 
 def classify_context(path: str, check_id: str) -> str:
+    if FIXTURE_VULN_RE.search(path):
+        return "fixture (vulnerabilidade plantada — não é código de produção)"
     is_tooling = bool(TOOLING_RE.search(path))
     is_taint = any(cat in check_id.lower() for cat in TAINT_CATEGORIES)
     if is_tooling and is_taint:
@@ -218,6 +250,24 @@ def classify_context(path: str, check_id: str) -> str:
     if is_tooling:
         return "tooling/test"
     return ""
+
+
+# Contextos que NÃO exigem ação: taint em código próprio e fixture plantada.
+DISPENSA_ATENCAO = ("provável falso-positivo", "fixture (")
+
+
+def exigem_atencao(findings: list[dict]) -> list[dict]:
+    """Achados que pedem decisão humana.
+
+    O nome antigo do contador — "fora de tooling/teste" — descrevia errado o que
+    ele filtrava: um `md5` ou `shell=True` dentro de `tests/` recebia o rótulo
+    tooling e ainda assim entrava na conta, porque o filtro só removia o texto
+    "provável falso-positivo" (que exige tooling E categoria de taint). Achado em
+    código de teste continua contando — teste roda de verdade —, mas fixture com
+    falha plantada não, e o rótulo agora diz o que faz.
+    """
+    return [f for f in findings
+            if not any(marca in f["context"] for marca in DISPENSA_ATENCAO)]
 
 
 def collect(sg: dict) -> list[dict]:
@@ -260,8 +310,8 @@ def render_console(findings: list[dict], files_scanned: int, rules_run: int) -> 
     print(f" regras com achado   : {rules_run}")
     order = sorted(by_sev, key=lambda s: SEV_RANK.get(s, 9))
     print(" achados por severidade: " + (", ".join(f"{s}={by_sev[s]}" for s in order) or "0"))
-    real = [f for f in findings if "provável falso-positivo" not in f["context"]]
-    print(f" total: {len(findings)}  ·  fora de tooling/teste: {len(real)}")
+    real = exigem_atencao(findings)
+    print(f" total: {len(findings)}  ·  exigem atenção: {len(real)}")
     print("-" * 62)
     if not findings:
         if files_scanned == 0:
@@ -743,8 +793,8 @@ def main() -> int:
 
     if args.fail_on and (configs or args.secrets):
         floor = SEV_RANK[args.fail_on]
-        real = [f for f in findings if "provável falso-positivo" not in f["context"]
-                and not f.get("aceito")
+        real = [f for f in exigem_atencao(findings)
+                if not f.get("aceito")
                 and SEV_RANK.get(f["severity"], 9) <= floor]
         if real:
             print(f"\nfail-on={args.fail_on}: {len(real)} achado(s) real(is) >= {args.fail_on}.")

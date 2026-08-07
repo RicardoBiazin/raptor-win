@@ -31,8 +31,8 @@ $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add("# raptor-win - varredura de $Base")
 $lines.Add("_$stamp_")
 $lines.Add("")
-$lines.Add("| Projeto | SAST (reais) | SCA (pacotes c/ CVE) |")
-$lines.Add("|---------|--------------|----------------------|")
+$lines.Add("| Projeto | SAST (exigem atencao) | SCA (pacotes c/ CVE) |")
+$lines.Add("|---------|-----------------------|----------------------|")
 
 $projs = Get-ChildItem $Base -Directory -ErrorAction SilentlyContinue | Where-Object { $Skip -notcontains $_.Name }
 foreach ($p in $projs) {
@@ -43,14 +43,15 @@ foreach ($p in $projs) {
   $log = Join-Path $dir "$($p.Name).log.txt"
   $res = & python "$here\raptor_win.py" $p.FullName --md (Join-Path $dir "$($p.Name).sast.md") --sca 2>&1 | Out-String
   $res | Set-Content $log -Encoding utf8
-  $m = [regex]::Match($res, 'total:\s*\d+.*?fora de tooling/teste:\s*(\d+)')
+  $m = [regex]::Match($res, 'total:\s*\d+.*?exigem aten\S+o:\s*(\d+)')
   $sastTxt = if ($m.Success) { $m.Groups[1].Value } else { '-' }
   $scaHits = ([regex]::Matches($res, "\u2014\s+\d+\s+vuln")).Count
   $scaTxt = if ($res -match 'Nenhuma depend') { '0' } elseif ($scaHits -gt 0) { "$scaHits" } else { '-' }
   $lines.Add("| $($p.Name) | $sastTxt | $scaTxt |")
 }
 $lines.Add("")
-$lines.Add("> SAST (reais) = achados do Semgrep fora de tooling/teste. SCA = pacotes com CVE (OSV).")
+$lines.Add("> SAST = achados do Semgrep que exigem atencao (exclui taint em codigo proprio e")
+$lines.Add("> fixture com falha plantada; achado em codigo de teste CONTA). SCA = CVE via OSV.")
 $lines.Add("> Detalhes por projeto: arquivos *.sast.md e *.log.txt nesta pasta.")
 $lines.Add("> Esta varredura NAO altera codigo nem faz push - revise e trate manualmente.")
 $lines | Set-Content $resumo -Encoding utf8
