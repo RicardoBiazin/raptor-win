@@ -11,6 +11,16 @@ report*.md
 out/
 .out/
 
+# Segredos e configuracao local (repositorio publico: nunca versionar)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+credentials*.json
+service-account*.json
+
 # Editores / SO
 .vscode/
 .idea/
