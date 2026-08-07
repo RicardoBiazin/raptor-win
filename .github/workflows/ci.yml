@@ -77,6 +77,66 @@ jobs:
           echo 'const ok = 1' >> /tmp/alvo2/bom.js
           python raptor_win.py /tmp/alvo2 --no-registry
 
+      - name: Fixture plantada nao conta como problema a resolver
+        run: |
+          # A ferramenta acusava a si mesma: as falhas de sample_vuln/ estao ali
+          # de proposito, e apareciam na conta de achados que exigem atencao.
+          # Um scanner que reporta as proprias fixtures ensina o usuario a
+          # ignorar o relatorio.
+          #
+          # Os achados CONTINUAM no relatorio (o passo de smoke acima depende
+          # disso) — o que muda e a classificacao.
+          python raptor_win.py sample_vuln --no-registry > fix.txt 2>&1
+          cat fix.txt
+          grep -q 'exigem aten' fix.txt
+          grep -Eq 'exigem aten\S+o: 0' fix.txt
+          grep -q 'fixture' fix.txt
+
+      - name: Nome de teste em portugues e reconhecido
+        run: |
+          # A heuristica so conhecia ingles: 'tests/' casava, 'testes/' nao, e a
+          # regra de nome de arquivo exigia ponto logo depois ('app.test.ts'),
+          # entao 'teste_injecao.py' era contado como codigo de producao. Em base
+          # escrita em portugues isso e o padrao, nao a excecao.
+          #
+          # 'testar_conexao.py' NAO pode casar: 'testar' e verbo de codigo real.
+          python - <<'EOF'
+          from raptor_win import TOOLING_RE as T
+          casos_tooling = ['testes/x.py', 'teste_injecao.py', 'src/foo_teste.py',
+                           'test_foo.py', 'src/foo_test.py', 'spec-foo.js']
+          casos_reais = ['src/testar_conexao.py', 'src/lib/format.ts',
+                         'src/pages/Contatos.tsx']
+          for c in casos_tooling:
+              assert T.search(c), f'deveria ser tooling: {c}'
+          for c in casos_reais:
+              assert not T.search(c), f'NAO deveria ser tooling: {c}'
+          print('ok')
+          EOF
+
+      - name: .env versionado — severidade pelo CONTEUDO, nao pelo nome
+        run: |
+          # Julgar pelo nome erra nos dois sentidos: deixa passar um .env.prod
+          # cheio de chave real e acusa como HIGH um .env.demo que so tem
+          # 'MARCA=PDV Demo'. O aviso preventivo continua nos dois casos, porque
+          # a razao dele e o futuro; a severidade e que precisa ser honesta.
+          mkdir -p /tmp/env-limpo && cd /tmp/env-limpo && git init -q
+          echo 'node_modules' > .gitignore
+          printf 'VITE_MARCA_NOME=PDV Demo\nVITE_MODO=1\nVITE_URL=\n' > .env.demo
+          cd - >/dev/null
+          python raptor_win.py /tmp/env-limpo --secrets --no-raptor --no-registry > env1.txt 2>&1 || true
+          cat env1.txt
+          grep -q 'arquivo-nao-ignorado' env1.txt   # o aviso continua
+          grep -q 'INFO' env1.txt                   # mas nao compete com chave real
+          # Com credencial de verdade dentro, volta a ser HIGH.
+          mkdir -p /tmp/env-sujo && cd /tmp/env-sujo && git init -q
+          echo 'node_modules' > .gitignore
+          KEY='AKIA''ABCDEFGHIJKLMNOP'
+          printf "AWS_ACCESS_KEY_ID=%s\n" "$KEY" > .env.demo
+          cd - >/dev/null
+          python raptor_win.py /tmp/env-sujo --secrets --no-raptor --no-registry > env2.txt 2>&1 || true
+          cat env2.txt
+          grep -q 'HIGH' env2.txt
+
       - name: Smoke da varredura de credenciais
         run: |
           # Fixture: um .env com senha, FORA do .gitignore — o cenário que
