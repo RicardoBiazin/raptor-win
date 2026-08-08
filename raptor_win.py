@@ -771,9 +771,18 @@ def main() -> int:
     # baseline muda o que REPROVA, não o que é mostrado. Achado dispensado
     # continua no relatório, marcado — sumir com ele seria a mesma cegueira
     # que o arquivo existe para evitar.
+    # O baseline padrão é procurado no diretório atual E ao lado do projeto
+    # escaneado. Só o primeiro não bastava: numa varredura de vários repositórios
+    # (scan-all.ps1 roda de fora, com o alvo por parâmetro), o arquivo de riscos
+    # aceitos de cada projeto era ignorado em silêncio — e o projeto voltava a
+    # reprovar por um risco que já tinha sido decidido e justificado.
     alvo_baseline = args.baseline
-    if alvo_baseline is None and Path(baseline_mod.NOME_PADRAO).exists():
-        alvo_baseline = baseline_mod.NOME_PADRAO
+    if alvo_baseline is None:
+        raiz_alvo = targets[0] if targets[0].is_dir() else targets[0].parent
+        for candidato in (Path(baseline_mod.NOME_PADRAO), raiz_alvo / baseline_mod.NOME_PADRAO):
+            if candidato.exists():
+                alvo_baseline = str(candidato)
+                break
     if alvo_baseline:
         cam = Path(alvo_baseline)
         if not cam.exists():
@@ -786,6 +795,13 @@ def main() -> int:
             return 2
         findings, resumo = baseline_mod.aplicar(findings, entradas)
         baseline_mod.render(resumo)
+        # O contador acima foi impresso ANTES do baseline. Sem esta linha, a
+        # saída afirma "exigem atenção: N" e três linhas depois dispensa N —
+        # duas contas verdadeiras que se contradizem na leitura. Os achados
+        # dispensados continuam no relatório (é o que o baseline promete); o
+        # que se corrige aqui é só o número final.
+        restantes = [f for f in exigem_atencao(findings) if not f.get("aceito")]
+        print(f" exigem atenção após o baseline: {len(restantes)}")
 
     if args.sugerir_baseline:
         print()

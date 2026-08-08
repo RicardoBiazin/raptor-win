@@ -188,6 +188,33 @@ jobs:
           grep -q 'dispensados'                    base.txt   # aceite válido
           grep -q 'VENCEU'                         base.txt   # prazo expirado volta a contar
           grep -q 'entrada sem achado'             base.txt   # órfã reportada
+      - name: Baseline do PROJETO e' achado quando se escaneia de fora
+        run: |
+          # O padrao era procurado so' no diretorio atual. Numa varredura de
+          # varios repositorios (scan-all.ps1 roda de fora, alvo por parametro),
+          # o arquivo de riscos aceitos de cada projeto era ignorado em silencio
+          # e o projeto voltava a reprovar por um risco ja' decidido.
+          #
+          # E a conta final tem de considerar o baseline: sem isso a saida diz
+          # "exigem atencao: N" e tres linhas depois dispensa N.
+          mkdir -p /tmp/proj-com-baseline && cd /tmp/proj-com-baseline && git init -q
+          echo 'node_modules' > .gitignore
+          TOKEN='ghp''_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789'
+          echo "const t = \"${TOKEN}\";" > app.js
+          {
+            echo '[[aceito]]'
+            echo 'regra  = "github-token"'
+            echo 'motivo = "Fixture do teste; o token e falso."'
+            echo 'ate    = 2027-01-01'
+          } > .raptor-baseline.toml
+          cd - >/dev/null
+          # roda de FORA do projeto, sem passar --baseline
+          python raptor_win.py /tmp/proj-com-baseline --secrets --no-raptor --no-registry \
+            > bl.txt 2>&1 || true
+          cat bl.txt
+          grep -q 'dispensados' bl.txt
+          grep -Eq 'exigem aten\S+o ap\S+s o baseline: 0' bl.txt
+
       - name: Baseline sem motivo é recusado
         run: |
           # Sem justificativa não é aceite de risco, é ocultação.
