@@ -183,4 +183,9 @@ Static analysis reports *possibilities*; you still validate exploitability.
   Thomas Dullien (Halvar Flake), Michael Bargury and John Cartwright — redistributed under their
   **MIT** licence. See `THIRD_PARTY/RAPTOR-LICENSE.txt` and `NOTICE`. Some RAPTOR rules reference
   CodeQL, which has its own non-commercial licence; `raptor-win` itself does not run CodeQL.
+- Rules under `rules/raptorwin/` are authored for `raptor-win` (MIT, same as the wrapper), kept
+  separate so the RAPTOR credit above stays unambiguous. Current set:
+  - `supabase/rls-anon-select` — Postgres/Supabase Row Level Security `SELECT` policy granted to the
+    `anon` role. RLS filters rows, not columns, so every column of the matching rows is world-readable
+    (stock, cost, internal codes, PII). Flags the pattern for review; the fix is a column-limited view.
 - Semgrep and its Registry packs are © r2c/Semgrep, used per their terms.

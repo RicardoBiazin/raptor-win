@@ -15,7 +15,8 @@ macOS/Linux too), with no Docker/WSL and nothing to compile.
 
 It is NOT affiliated with the RAPTOR project. The bundled rules under
 `rules/raptor/` are RAPTOR's, redistributed under their MIT licence (see
-THIRD_PARTY/RAPTOR-LICENSE.txt). Everything else here is a thin wrapper.
+THIRD_PARTY/RAPTOR-LICENSE.txt). Rules under `rules/raptorwin/` are authored for
+raptor-win itself. Everything else here is a thin wrapper.
 """
 from __future__ import annotations
 
@@ -52,6 +53,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RAPTOR_RULES = HERE / "rules" / "raptor"
+# Rules authored for raptor-win itself (NOT from the RAPTOR project). Kept in a
+# separate folder so the provenance — and the MIT credit to RAPTOR — stays honest.
+WIN_RULES = HERE / "rules" / "raptorwin"
 
 # Extensions -> Semgrep Registry packs to add when that language is present.
 LANG_PACKS: dict[str, list[str]] = {
@@ -176,6 +180,11 @@ def build_configs(exts: set[str], use_raptor: bool, use_registry: bool,
     configs: list[str] = []
     if use_raptor and raptor_rules.exists():
         configs.append(str(raptor_rules))
+    # raptor-win's own authored rules load alongside the RAPTOR set — both are
+    # "our curated rules" as opposed to the Registry packs — and share the
+    # `--no-raptor` gate.
+    if use_raptor and WIN_RULES.exists():
+        configs.append(str(WIN_RULES))
     if use_registry:
         packs: list[str] = list(ALWAYS_PACKS)
         for e in exts:
@@ -356,7 +365,7 @@ def render_markdown(findings: list[dict], target: str, files_scanned: int, rules
         "",
         "> Triagem: findings em `tooling/test` de categorias de taint (SSRF/path-traversal/injeção)",
         "> costumam ser falsos-positivos (acessam recursos próprios, não entrada de terceiros).",
-        "> As regras `rules/raptor/` são do projeto RAPTOR (MIT). Ver `THIRD_PARTY/RAPTOR-LICENSE.txt`.",
+        "> As regras `rules/raptor/` são do projeto RAPTOR (MIT); `rules/raptorwin/` são do próprio raptor-win. Ver `THIRD_PARTY/RAPTOR-LICENSE.txt`.",
     ]
     return "\n".join(lines)
 
