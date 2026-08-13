@@ -1,0 +1,45 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Supabase / Postgres RLS — SELECT policy granted to the anonymous role
+  # (CWE-201: Information Exposure Through Sent Data).
+  #
+  # NOT a RAPTOR rule. Authored for raptor-win from a real finding: a public
+  # menu backed by Supabase exposed live stock levels and internal item codes to
+  # any unauthenticated visitor, because an `anon` SELECT policy filters by ROW,
+  # never by COLUMN — every column of every matching row is returned.
+  #
+  # Generic mode (not a SQL parser): matches the policy DDL as tokens, so it
+  # works without Semgrep's experimental SQL support. It flags the pattern for
+  # review rather than asserting a bug — an anon-readable table is legitimate
+  # (a public menu), but the reviewer must confirm no sensitive column rides
+  # along. The fix is a column-limited VIEW (or a SECURITY DEFINER function)
+  # exposed to anon, with the base table's anon SELECT removed.
+  # ---------------------------------------------------------------------------
+  - id: raptor.supabase.rls-anon-select
+    message: >-
+      Row Level Security SELECT policy is granted to the `anon` (unauthenticated)
+      role. RLS filters rows, never columns, so EVERY column of the matching rows
+      is world-readable — stock, cost, internal codes and any PII on that table
+      leak to anyone with the public anon key. Confirm the table carries nothing
+      sensitive, or expose a column-limited VIEW to `anon` and drop the anon
+      SELECT on the base table.
+    languages: [generic]
+    severity: WARNING
+    paths:
+      include:
+        - "*.sql"
+    # Anchor on the exact token run `for select to anon`, no ellipsis. One match
+    # per policy, no duplication: a policy grants either `to anon[, ...]` or
+    # `to authenticated, anon` — the two alternatives never overlap the same
+    # statement, and neither is a prefix of the other. `for select to
+    # authenticated` (the safe, common case) simply never contains either run.
+    pattern-either:
+      - pattern: for select to anon
+      - pattern: for select to authenticated, anon
+    metadata:
+      cwe: ["CWE-201: Information Exposure Through Sent Data"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      references:
+        - https://supabase.com/docs/guides/database/postgres/row-level-security
+      tags: ["security", "supabase", "postgres", "rls", "access-control", "info-disclosure"]
+      confidence: MEDIUM
