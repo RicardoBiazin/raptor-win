@@ -1,0 +1,38 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Web Push subscription endpoint used as a fetch() URL without a host
+  # allowlist (CWE-918: Server-Side Request Forgery).
+  #
+  # NOT a RAPTOR rule. Authored for raptor-win from a real finding: a Supabase
+  # Edge Function sent Web Push by POSTing to `subscription.endpoint`, a value
+  # the subscriber controls (it is stored from the browser's PushSubscription).
+  # A privileged or compromised account could register an endpoint pointing at
+  # an internal service and turn the server into a blind SSRF POST.
+  #
+  # The subscription endpoint is UNIVERSALLY named `endpoint` (Push API spec),
+  # so `fetch(x.endpoint, ...)` on the server is a precise, low-noise signature
+  # of a push sender. This flags it for review — the pattern is legitimate once
+  # the host is checked against the real push services (fcm.googleapis.com,
+  # web.push.apple.com, *.push.services.mozilla.com, *.notify.windows.com).
+  # The fix is an allowlist of those hosts (and https:) before the fetch.
+  # ---------------------------------------------------------------------------
+  - id: raptor.ssrf.web-push-endpoint
+    message: >-
+      Web Push subscription endpoint is used directly as a fetch() URL. The
+      endpoint comes from the subscriber's browser and is attacker-influenced —
+      without a host allowlist this is a blind SSRF: the server can be made to
+      POST to an internal address. Validate that the endpoint host is a known
+      push service (fcm.googleapis.com, web.push.apple.com,
+      push.services.mozilla.com, notify.windows.com) over https before sending.
+    languages: [typescript, javascript]
+    severity: WARNING
+    pattern-either:
+      - pattern: fetch($SUB.endpoint, ...)
+      - pattern: fetch($SUB.endpoint)
+      - pattern: fetch(`${$SUB.endpoint}`, ...)
+    metadata:
+      cwe: ["CWE-918: Server-Side Request Forgery (SSRF)"]
+      owasp_top_10: ["A10:2021-Server-Side Request Forgery"]
+      references:
+        - "https://datatracker.ietf.org/doc/html/rfc8030"
+      tags: ["security", "ssrf", "web-push", "supabase", "edge-function"]
