@@ -84,10 +84,12 @@ SKIP_DIRS = {
 
 # Severity ordering (Semgrep uses ERROR/WARNING/INFO; registry rules also emit
 # CRITICAL/HIGH/MEDIUM/LOW in extra.severity/metadata).
-SEV_RANK = {"CRITICAL": 0, "ERROR": 1, "HIGH": 2, "WARNING": 3, "MEDIUM": 4, "INFO": 5, "LOW": 6}
+SEV_RANK = {"CRITICAL": 0, "ERROR": 1, "HIGH": 2, "WARNING": 3,
+            "UNKNOWN": 3, "MEDIUM": 4, "INFO": 5, "LOW": 6}
 # Map to SARIF levels (GitHub Code Scanning understands error/warning/note).
 SARIF_LEVEL = {"CRITICAL": "error", "ERROR": "error", "HIGH": "error",
-               "WARNING": "warning", "MEDIUM": "warning", "INFO": "note", "LOW": "note"}
+               "WARNING": "warning", "UNKNOWN": "warning", "MEDIUM": "warning",
+               "INFO": "note", "LOW": "note"}
 
 # Paths that are dev tooling / tests — taint findings there are usually false
 # positives (they hit *your own* known endpoints/paths, not attacker input).
@@ -309,9 +311,9 @@ def short_rule(rule: str) -> str:
 def render_console(findings: list[dict], files_scanned: int, rules_run: int) -> None:
     by_sev = Counter(f["severity"] for f in findings)
     print("\n" + "=" * 62)
-    print(" raptor-win — relatório SAST")
+    print(" raptor-win — relatório consolidado")
     print("=" * 62)
-    print(f" arquivos escaneados : {files_scanned}")
+    print(f" arquivos SAST       : {files_scanned}")
     # "regras COM ACHADO", não "executadas": este número conta check_ids
     # distintos entre os resultados. Rotulado como "executadas" ele dizia
     # sempre 0 num scan limpo, sugerindo que nada tinha rodado — e, pior,
@@ -319,7 +321,7 @@ def render_console(findings: list[dict], files_scanned: int, rules_run: int) -> 
     print(f" regras com achado   : {rules_run}")
     order = sorted(by_sev, key=lambda s: SEV_RANK.get(s, 9))
     print(" achados por severidade: " + (", ".join(f"{s}={by_sev[s]}" for s in order) or "0"))
-    real = exigem_atencao(findings)
+    real = [f for f in exigem_atencao(findings) if not f.get("aceito")]
     print(f" total: {len(findings)}  ·  exigem atenção: {len(real)}")
     print("-" * 62)
     if not findings:
@@ -346,11 +348,11 @@ def render_markdown(findings: list[dict], target: str, files_scanned: int, rules
     by_sev = Counter(f["severity"] for f in findings)
     order = sorted(by_sev, key=lambda s: SEV_RANK.get(s, 9))
     lines = [
-        f"# raptor-win — relatório SAST",
+        f"# raptor-win — relatório consolidado",
         "",
         f"- **Alvo:** `{target}`",
         f"- **Gerado em:** {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"- **Arquivos escaneados:** {files_scanned}",
+        f"- **Arquivos SAST:** {files_scanned}",
         f"- **Regras com achado:** {rules_run}",
         f"- **Achados:** {len(findings)} (" + (", ".join(f"{s}: {by_sev[s]}" for s in order) or "0") + ")",
         "",
@@ -381,7 +383,7 @@ def to_sarif(findings: list[dict]) -> dict:
             uri = os.path.relpath(f["path"]).replace("\\", "/")
         except ValueError:
             uri = f["path"].replace("\\", "/")
-        results.append({
+        result = {
             "ruleId": rid,
             "level": SARIF_LEVEL.get(f["severity"], "warning"),
             "message": {"text": f["message"] or short_rule(rid)},
@@ -389,7 +391,14 @@ def to_sarif(findings: list[dict]) -> dict:
                 "artifactLocation": {"uri": uri},
                 "region": {"startLine": max(1, int(f["line"] or 1))},
             }}],
-        })
+        }
+        if f.get("aceito"):
+            aceite = f["aceito"]
+            result["suppressions"] = [{
+                "kind": "external",
+                "justification": aceite.get("motivo", "Risco aceito no baseline"),
+            }]
+        results.append(result)
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -419,10 +428,12 @@ def changed_files(target: Path, ref: str) -> "list[Path] | None":
                           capture_output=True, text=True)
     if diff.returncode != 0:
         return None
+    target = target.resolve()
     files = []
     for line in diff.stdout.splitlines():
         p = (base / line).resolve()
-        if p.is_file() and str(p).startswith(str(target)):
+        dentro = p == target if target.is_file() else p.is_relative_to(target)
+        if p.is_file() and dentro:
             files.append(p)
     return files
 
@@ -528,11 +539,14 @@ def enumerate_venv(target: Path) -> list[tuple[str, str, str]]:
 def _osv_severity(v: dict) -> str:
     ds = (v.get("database_specific") or {}).get("severity")
     if ds:
-        return str(ds).upper()
+        normalized = {"MODERATE": "MEDIUM"}.get(str(ds).upper(), str(ds).upper())
+        return normalized if normalized in SEV_RANK else "UNKNOWN"
     for s in v.get("severity", []) or []:
         sc = str(s.get("score", ""))
-        m = re.search(r"/S:.|(\d+\.\d+)$", sc)  # tenta um número CVSS ao final
-        num = re.search(r"(\d+\.\d+)", sc)
+        # Um vetor normalmente começa por ``CVSS:3.1``. Tratar esse 3.1 como
+        # score classificava vulnerabilidades graves como LOW. Só aceitamos
+        # um score numérico explícito; aproximar um vetor produz precisão falsa.
+        num = re.fullmatch(r"\s*(10(?:\.0)?|[0-9](?:\.\d+)?)\s*", sc)
         if num:
             f = float(num.group(1))
             return "CRITICAL" if f >= 9 else "HIGH" if f >= 7 else "MEDIUM" if f >= 4 else "LOW"
@@ -556,17 +570,22 @@ def run_sca(targets: list[Path]) -> "dict | None":
         "poetry.lock": parse_poetry_lock, "Pipfile.lock": parse_pipfile_lock,
     }
     deps: list[tuple[str, str, str]] = []
+    dep_paths: dict[tuple[str, str, str], str] = {}
     sources: list[str] = []
     for m in manifests:
         got = parsers[m.name](m)
         if got:
             deps += got
+            for dep in got:
+                dep_paths.setdefault(dep, str(m))
             sources.append(m.name)
     for t in targets:  # pacotes instalados em .venv (cobre requirements sem pin)
         if t.is_dir():
             venv_deps = enumerate_venv(t)
             if venv_deps:
                 deps += venv_deps
+                for dep in venv_deps:
+                    dep_paths.setdefault(dep, str(t / ".venv"))
                 sources.append(".venv (instalados)")
     # dedup preservando ordem
     seen: set = set()
@@ -596,7 +615,27 @@ def run_sca(targets: list[Path]) -> "dict | None":
                 details[vid] = json.loads(r.read())
         except Exception:
             details[vid] = {}
-    return {"sources": sources, "deps": len(deps), "vulns": hits, "details": details}
+    findings: list[dict] = []
+    for dep, ids in hits.items():
+        eco, name, ver = dep
+        for vid in ids:
+            vuln = details.get(vid, {})
+            fixed = _osv_fixed(vuln) if vuln else ""
+            summary = (vuln.get("summary") or "Vulnerabilidade conhecida na dependência").strip()
+            message = f"{name}@{ver}: {summary}"
+            if fixed:
+                message += f"; corrigido em {fixed}"
+            message += f"; https://osv.dev/vulnerability/{vid}"
+            findings.append({
+                "rule": vid,
+                "severity": _osv_severity(vuln) if vuln else "UNKNOWN",
+                "path": dep_paths.get(dep, ""),
+                "line": 1,
+                "message": message,
+                "context": f"SCA · {eco}",
+            })
+    return {"sources": sources, "deps": len(deps), "vulns": hits,
+            "details": details, "findings": findings}
 
 
 def render_secrets(achados: list[dict]) -> None:
@@ -672,7 +711,8 @@ def main() -> int:
                     help=f"arquivo de riscos aceitos (padrao: {baseline_mod.NOME_PADRAO} se existir)")
     ap.add_argument("--sugerir-baseline", action="store_true",
                     help="imprime um modelo TOML para os achados ainda nao dispensados")
-    ap.add_argument("--fail-on", choices=list(SEV_RANK), help="sai com código 1 se houver achado real >= esta severidade")
+    ap.add_argument("--fail-on", choices=[s for s in SEV_RANK if s != "UNKNOWN"],
+                    help="sai com código 1 se houver achado real >= esta severidade")
     args = ap.parse_args()
 
     semgrep = find_semgrep()
@@ -682,8 +722,6 @@ def main() -> int:
         if not t.exists():
             sys.stderr.write(f"alvo inexistente: {t}\n")
             return 2
-
-    sca_targets = list(targets)  # SCA usa os alvos originais (dirs), não a lista do --changed
 
     if args.changed:
         cf = changed_files(targets[0], args.changed)
@@ -748,33 +786,23 @@ def main() -> int:
                 "\nUm relatório vazio aqui significaria 'não analisei', não 'está limpo'.\n")
             return 2
 
-        render_console(findings, files_scanned, rules_run)
-        if args.md:
-            Path(args.md).write_text(render_markdown(findings, str(targets[0]), files_scanned, rules_run), encoding="utf-8")
-            print(f"\nMarkdown: {args.md}")
-        if args.sarif:
-            Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
-            print(f"SARIF: {args.sarif}")
-
     # Os achados de credencial entram na MESMA lista dos de código, de
     # propósito: assim atravessam console, Markdown, SARIF e --fail-on sem
     # nenhum tratamento à parte. Um segredo comitado é achado de segurança
     # como outro qualquer — não merece um relatório separado que ninguém lê.
     if args.secrets:
-        seg = secrets_scan.escanear(sca_targets, SKIP_DIRS)
+        seg = secrets_scan.escanear(targets, SKIP_DIRS)
         findings = sorted(findings + seg,
                           key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
         render_secrets(seg)
-        if args.md:
-            Path(args.md).write_text(
-                render_markdown(findings, str(targets[0]), files_scanned if configs else 0,
-                                rules_run if configs else 0),
-                encoding="utf-8")
-        if args.sarif:
-            Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
 
+    sca = None
     if args.sca:
-        render_sca(run_sca(sca_targets))
+        sca = run_sca(targets)
+        render_sca(sca)
+        if not sca.get("error"):
+            findings = sorted(findings + sca.get("findings", []),
+                              key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
 
     # RISCOS ACEITOS. Aplicado no fim, sobre a lista já completa: o
     # baseline muda o que REPROVA, não o que é mostrado. Achado dispensado
@@ -812,11 +840,24 @@ def main() -> int:
         restantes = [f for f in exigem_atencao(findings) if not f.get("aceito")]
         print(f" exigem atenção após o baseline: {len(restantes)}")
 
+    # Todos os formatos são gerados somente depois de reunir SAST, credenciais
+    # e SCA e de aplicar o baseline. Assim preservam a mesma visão dos achados.
+    if findings or configs:
+        render_console(findings, files_scanned, rules_run)
+    if args.md:
+        Path(args.md).write_text(
+            render_markdown(findings, str(targets[0]), files_scanned, rules_run),
+            encoding="utf-8")
+        print(f"\nMarkdown: {args.md}")
+    if args.sarif:
+        Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
+        print(f"SARIF: {args.sarif}")
+
     if args.sugerir_baseline:
         print()
         print(baseline_mod.prox_de_aceitar(findings))
 
-    if args.fail_on and (configs or args.secrets):
+    if args.fail_on and (configs or args.secrets or args.sca):
         floor = SEV_RANK[args.fail_on]
         real = [f for f in exigem_atencao(findings)
                 if not f.get("aceito")

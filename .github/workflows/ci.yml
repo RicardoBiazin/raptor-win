@@ -9,6 +9,20 @@ on:
     branches: [main]
 
 jobs:
+  unit:
+    name: Unitários (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Testes unitários
+        run: python -m unittest discover -s tests -v
+
   smoke:
     runs-on: ubuntu-latest
     steps:
