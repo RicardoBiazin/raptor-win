@@ -1,0 +1,35 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # React href bound to a NON-LITERAL value without URL-scheme validation
+  # (CWE-79: XSS via javascript:/data: URI).
+  #
+  # NOT a RAPTOR rule. Authored for raptor-win from a real finding: a public
+  # footer rendered <a href={item.valor}> where `valor` was an operator-editable
+  # database field. React escapes text but does NOT block a `javascript:` URI in
+  # href — a stored `javascript:...` executes in the visitor's browser (stored
+  # XSS). The fix: allow only http(s) before binding.
+  #
+  # The pattern-not lines drop the safe, common literal forms (href="https://…"
+  # and href={"https://…"}); what remains is a dynamic value, flagged for review.
+  # ---------------------------------------------------------------------------
+  - id: raptor.xss.href-scheme-unvalidated
+    message: >-
+      A dynamic value is bound to href without URL-scheme validation. React does
+      not neutralise a `javascript:` or `data:` URI in href, so an
+      attacker-influenced value (e.g. an operator-editable DB field on a public
+      page) becomes stored XSS. Allow only http(s) before binding — e.g.
+      `href={/^https?:\/\//.test(v) ? v : '#'}`.
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: <a href={$V} />
+          - pattern: <a ... href={$V}>...</a>
+      - pattern-not: <a href="..." />
+      - pattern-not: <a ... href="...">...</a>
+      - pattern-not: <a href={"..."} />
+      - pattern-not: <a ... href={"..."}>...</a>
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "xss", "react", "href", "javascript-uri"]
