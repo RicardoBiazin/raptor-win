@@ -177,6 +177,11 @@ wrong in both directions.
 
 Static analysis reports *possibilities*; you still validate exploitability.
 
+## Contributors
+
+- [Ricardo Biazin](https://github.com/RicardoBiazin) — creator and maintainer.
+- **OpenAI Codex** — AI-assisted code review, implementation and testing.
+
 ## Credits & licence
 
 - `raptor-win` (this wrapper): **MIT** — see `LICENSE`.
