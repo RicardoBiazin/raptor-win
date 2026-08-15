@@ -10,3 +10,13 @@ def weak_hash(data: bytes) -> str:
 
 def run(user_input: str) -> None:
     subprocess.run(user_input, shell=True)  # command injection (esperado)
+
+# XPath injection: input do usuario concatenado na consulta (esperado)
+def buscar(tree, request):
+    termo = request.GET.get("q")
+    return tree.xpath("//user[name='" + termo + "']")
+
+# Prompt injection: input do usuario vai direto ao prompt do LLM (esperado)
+def resumir(client, request):
+    texto = request.POST.get("texto")
+    return client.chat.completions.create(model="gpt-x", messages=[{"role": "user", "content": texto}])
