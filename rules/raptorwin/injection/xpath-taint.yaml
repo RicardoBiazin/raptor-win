@@ -1,0 +1,78 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Python — taint: web framework sources -> XPath query sinks (CWE-643).
+  # Completa a familia de injecao do raptor-win (havia SQL/LDAP/command/eval/
+  # NoSQL/SSTI, faltava XPath).
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.injection.xpath.taint.python
+    message: >-
+      Untrusted data flows into an XPath query. An attacker can alter the query
+      to read other nodes (XPath injection). Do not build the expression by
+      concatenation — use parameterised variables (lxml: xpath(expr,
+      var=value)) or strictly validate the input.
+    languages: [python]
+    severity: CRITICAL
+    mode: taint
+    metadata:
+      cwe: ["CWE-643: Improper Neutralization of Data within XPath Expressions"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "injection", "xpath"]
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.GET[...]
+          - pattern: request.POST[...]
+          - pattern: request.GET.get(...)
+          - pattern: request.POST.get(...)
+          - pattern: request.data[...]
+          - pattern: request.query_params[...]
+          - pattern: flask.request.args[...]
+          - pattern: flask.request.args.get(...)
+          - pattern: flask.request.form[...]
+          - pattern: flask.request.get_json(...)
+          - pattern: input(...)
+          - pattern: os.environ.get(...)
+          - pattern: sys.argv[...]
+    pattern-sinks:
+      - patterns:
+          - pattern: $DOC.xpath($Q, ...)
+          - focus-metavariable: $Q
+      - patterns:
+          - pattern: etree.XPath($Q, ...)
+          - focus-metavariable: $Q
+      - patterns:
+          - pattern: $DOC.find($Q, ...)
+          - focus-metavariable: $Q
+      - patterns:
+          - pattern: $DOC.findall($Q, ...)
+          - focus-metavariable: $Q
+
+  # ---------------------------------------------------------------------------
+  # JavaScript / TypeScript — user input concatenated into document.evaluate().
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.injection.xpath.taint.js
+    message: >-
+      Untrusted data flows into document.evaluate()/XPathEvaluator — XPath
+      injection (CWE-643). Validate the input or avoid building the expression
+      from request data.
+    languages: [typescript, javascript]
+    severity: CRITICAL
+    mode: taint
+    metadata:
+      cwe: ["CWE-643: Improper Neutralization of Data within XPath Expressions"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "injection", "xpath"]
+    pattern-sources:
+      - pattern-either:
+          - pattern: req.query
+          - pattern: req.query.$X
+          - pattern: req.params
+          - pattern: req.params.$X
+          - pattern: req.body
+          - pattern: req.body.$X
+    pattern-sinks:
+      - patterns:
+          - pattern: document.evaluate($Q, ...)
+          - focus-metavariable: $Q
+      - patterns:
+          - pattern: $E.evaluate($Q, ...)
+          - focus-metavariable: $Q

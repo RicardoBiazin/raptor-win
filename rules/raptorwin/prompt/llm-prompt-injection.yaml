@@ -1,0 +1,71 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Prompt Injection — untrusted input flows into an LLM prompt (CWE-1427,
+  # OWASP LLM01). Static scanners cannot "fix" prompt injection, so this flags
+  # the flow for review: user input reaching a model prompt must be treated as
+  # DATA (delimited, with system guidance and output validation), never as
+  # instructions. Fires only when an LLM SDK is actually used.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.prompt.injection.python
+    message: >-
+      Untrusted input flows into an LLM prompt (OpenAI/Anthropic/Gemini). Prompt
+      injection: the model may follow attacker instructions in the data. Delimit
+      and label user content as data, keep trusted instructions in the system
+      role, and validate/limit what the model output is allowed to trigger.
+    languages: [python]
+    severity: WARNING
+    mode: taint
+    metadata:
+      cwe: ["CWE-1427: Improper Neutralization of Input Used for LLM Prompting"]
+      owasp: ["LLM01:2025-Prompt Injection"]
+      tags: ["security", "prompt-injection", "llm", "ai"]
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.GET[...]
+          - pattern: request.POST[...]
+          - pattern: request.GET.get(...)
+          - pattern: request.POST.get(...)
+          - pattern: request.data[...]
+          - pattern: request.json[...]
+          - pattern: request.query_params[...]
+          - pattern: flask.request.args.get(...)
+          - pattern: flask.request.form[...]
+          - pattern: flask.request.get_json(...)
+          - pattern: input(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: openai.ChatCompletion.create(...)
+              - pattern: openai.chat.completions.create(...)
+              - pattern: $CLIENT.chat.completions.create(...)
+              - pattern: $CLIENT.responses.create(...)
+              - pattern: anthropic.messages.create(...)
+              - pattern: $CLIENT.messages.create(...)
+              - pattern: $MODEL.generate_content(...)
+
+  - id: raptorwin.prompt.injection.js
+    message: >-
+      Untrusted input flows into an LLM prompt (OpenAI/Anthropic SDK). Prompt
+      injection: treat user content as DATA (delimited), keep instructions in the
+      system role, and validate what the output may trigger.
+    languages: [typescript, javascript]
+    severity: WARNING
+    mode: taint
+    metadata:
+      cwe: ["CWE-1427: Improper Neutralization of Input Used for LLM Prompting"]
+      owasp: ["LLM01:2025-Prompt Injection"]
+      tags: ["security", "prompt-injection", "llm", "ai"]
+    pattern-sources:
+      - pattern-either:
+          - pattern: req.query
+          - pattern: req.query.$X
+          - pattern: req.body
+          - pattern: req.body.$X
+          - pattern: req.params.$X
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CLIENT.chat.completions.create(...)
+              - pattern: $CLIENT.responses.create(...)
+              - pattern: $CLIENT.messages.create(...)
+              - pattern: openai.chat.completions.create(...)
