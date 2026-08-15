@@ -1,0 +1,38 @@
+name: Release
+
+# A cada tag vX.Y.Z: valida (smoke) e publica um Release com as notas geradas
+# dos commits desde a tag anterior. Sem passo manual — marcar a tag basta.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # necessário para o gh criar o Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # histórico completo: as notas comparam com a tag anterior
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Não publica versão quebrada: compila e roda o smoke em sample_vuln, como o CI.
+      - name: Compilar
+        run: python -m py_compile raptor_win.py
+      - name: Instalar Semgrep
+        run: pip install semgrep
+      - name: Smoke test
+        run: |
+          python raptor_win.py sample_vuln --md report.md
+          grep -Eq 'CRITICAL|ERROR|HIGH|WARNING' report.md
+
+      - name: Publicar o Release com notas dos commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
