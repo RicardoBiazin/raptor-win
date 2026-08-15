@@ -1,7 +1,11 @@
 name: Release
 
-# A cada tag vX.Y.Z: valida (smoke) e publica um Release com as notas geradas
-# dos commits desde a tag anterior. Sem passo manual — marcar a tag basta.
+# A cada tag vX.Y.Z: valida (smoke) e publica um Release com as notas montadas
+# a partir dos COMMITS desde a tag anterior. Sem passo manual — marcar a tag basta.
+#
+# Por que não `--generate-notes`: aquele gera as notas de Pull Requests mergeados;
+# como aqui se commita direto na main (sem PRs), ele sairia vazio. As notas vêm do
+# `git log` entre a tag anterior e a atual.
 on:
   push:
     tags:
@@ -16,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0   # histórico completo: as notas comparam com a tag anterior
+          fetch-depth: 0   # histórico completo: precisa da tag anterior
 
       - uses: actions/setup-python@v5
         with:
@@ -32,7 +36,21 @@ jobs:
           python raptor_win.py sample_vuln --md report.md
           grep -Eq 'CRITICAL|ERROR|HIGH|WARNING' report.md
 
-      - name: Publicar o Release com notas dos commits
+      - name: Montar as notas a partir dos commits
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then
+            echo "## Mudanças desde ${PREV}" > NOTES.md
+            RANGE="${PREV}..${TAG}"
+          else
+            echo "## Primeiro release" > NOTES.md
+            RANGE="${TAG}"
+          fi
+          echo "" >> NOTES.md
+          git log --no-merges --pretty='- %s' "$RANGE" >> NOTES.md
+
+      - name: Publicar o Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes-file NOTES.md
