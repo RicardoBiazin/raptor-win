@@ -32,6 +32,7 @@ from collections import Counter, defaultdict
 
 import baseline as baseline_mod
 import secrets_scan
+import typosquat
 
 # O CONSOLE DO WINDOWS NÃO É UTF-8 POR PADRÃO. Ele abre em cp1252, que não
 # tem "✅" nem os caracteres de moldura do relatório — e o `print` levanta
@@ -445,15 +446,26 @@ SCA_MANIFESTS = ("requirements.txt", "package-lock.json", "poetry.lock", "Pipfil
 SCA_DETAIL_CAP = 120  # nº máx. de detalhes de vuln buscados (evita floods)
 
 
+def _e_manifesto(nome: str) -> bool:
+    """Aceita `requirements-dev.txt`, `requirements-extras.txt` e afins.
+
+    Casar so' o nome exato deixava de fora a convencao mais comum de dividir
+    dependencias por ambiente -- e o arquivo ignorado nao gerava aviso nenhum,
+    so' sumia do relatorio.
+    """
+    return nome in SCA_MANIFESTS or (
+        nome.startswith("requirements") and nome.endswith(".txt"))
+
+
 def find_manifests(targets: list[Path]) -> list[Path]:
     out: list[Path] = []
     for t in targets:
-        if t.is_file() and t.name in SCA_MANIFESTS:
+        if t.is_file() and _e_manifesto(t.name):
             out.append(t)
             continue
         if t.is_dir():
             for p in t.rglob("*"):
-                if p.name in SCA_MANIFESTS and p.is_file() and not any(x in SKIP_DIRS for x in p.parts):
+                if _e_manifesto(p.name) and p.is_file() and not any(x in SKIP_DIRS for x in p.parts):
                     out.append(p)
     return out
 
@@ -465,8 +477,18 @@ def parse_requirements(path: Path) -> list[tuple[str, str, str]]:
         if not line or line.startswith("-"):
             continue
         m = re.match(r"^([A-Za-z0-9._-]+)\s*(?:\[[^\]]+\])?\s*===?\s*([A-Za-z0-9._+!-]+)", line)
-        if m:  # só pinado (name==version) dá para consultar versão exata
+        if m:  # pinado (name==version): da' para consultar a versao exata no OSV
             deps.append(("PyPI", m.group(1), m.group(2)))
+            continue
+        # SEM PIN (`>=`, `~=`, `>`, ou nome solto). Nao da' para perguntar ao OSV
+        # por uma versao que o arquivo nao declara -- mas DESCARTAR era pior:
+        # um requirements.txt inteiro em `>=` produzia "0 dependencias
+        # verificadas -- nenhuma vulneravel ✅", um "tudo certo" falso. A versao
+        # fica vazia, o nome segue para o typosquat (que so' precisa do nome) e
+        # o relatorio diz quantas ficaram sem checagem de versao.
+        m = re.match(r"^([A-Za-z0-9._-]+)\s*(?:\[[^\]]+\])?\s*(?:[<>=~!]|$)", line)
+        if m:
+            deps.append(("PyPI", m.group(1), ""))
     return deps
 
 
@@ -573,7 +595,15 @@ def run_sca(targets: list[Path]) -> "dict | None":
     dep_paths: dict[tuple[str, str, str], str] = {}
     sources: list[str] = []
     for m in manifests:
-        got = parsers[m.name](m)
+        # Despacho por nome EXATO quebrava nas variantes que a descoberta passou
+        # a aceitar (`requirements-nuvem.txt` levantava KeyError e derrubava a
+        # varredura inteira). Qualquer `requirements*.txt` usa o mesmo parser.
+        parser = parsers.get(m.name)
+        if parser is None and m.name.startswith("requirements"):
+            parser = parse_requirements
+        if parser is None:
+            continue
+        got = parser(m)
         if got:
             deps += got
             for dep in got:
@@ -592,7 +622,11 @@ def run_sca(targets: list[Path]) -> "dict | None":
     deps = [d for d in deps if not (d in seen or seen.add(d))]
     if not deps:
         return {"sources": sources, "deps": 0, "vulns": {}}
-    queries = [{"package": {"name": n, "ecosystem": e}, "version": v} for (e, n, v) in deps]
+    # O OSV exige versao exata; os sem pin ficam de fora DA CONSULTA, nunca do
+    # relatorio (ver `sem_pin` abaixo).
+    pinados = [d for d in deps if d[2]]
+    sem_pin = [d for d in deps if not d[2]]
+    queries = [{"package": {"name": n, "ecosystem": e}, "version": v} for (e, n, v) in pinados]
     hits: dict[tuple, list[str]] = {}
     try:
         for i in range(0, len(queries), 500):
@@ -600,7 +634,7 @@ def run_sca(targets: list[Path]) -> "dict | None":
             req = urllib.request.Request(OSV_BATCH, data=body, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=30) as r:
                 res = json.loads(r.read()).get("results", [])
-            for dep, item in zip(deps[i:i + 500], res):
+            for dep, item in zip(pinados[i:i + 500], res):
                 ids = [x["id"] for x in (item.get("vulns") or [])]
                 if ids:
                     hits[dep] = ids
@@ -634,8 +668,24 @@ def run_sca(targets: list[Path]) -> "dict | None":
                 "message": message,
                 "context": f"SCA · {eco}",
             })
+    # TYPOSQUAT. Roda sobre as mesmas dependencias ja' parseadas, entao nao
+    # custa I/O nem uma linha de manifesto a mais. E' o complemento necessario
+    # do OSV: pacote malicioso publicado ha' minutos nao tem CVE nenhum, e
+    # portanto passa limpo pela checagem de vulnerabilidade -- o unico sinal
+    # disponivel e' o nome ser quase o de um pacote popular.
+    squat = typosquat.escanear(deps)
+    for a in squat:
+        findings.append({
+            "rule": "typosquat",
+            "severity": a["severity"].upper(),
+            "path": dep_paths.get((a["ecosystem"], a["name"], a["version"]), ""),
+            "line": 1,
+            "message": (f"{a['name']}@{a['version']}: {a['reason']}"),
+            "context": f"SCA · {a['ecosystem']}",
+        })
     return {"sources": sources, "deps": len(deps), "vulns": hits,
-            "details": details, "findings": findings}
+            "details": details, "findings": findings, "typosquat": squat,
+            "pinados": len(pinados), "sem_pin": sorted({n for (_e, n, _v) in sem_pin})}
 
 
 def render_secrets(achados: list[dict]) -> None:
@@ -666,6 +716,18 @@ def render_secrets(achados: list[dict]) -> None:
         print(" depois limpe o arquivo.")
 
 
+def _render_typosquat(achados: list[dict]) -> None:
+    """Sai ANTES da lista de CVEs: nome suspeito e' mais urgente que CVE antigo."""
+    cobertos = ", ".join(typosquat.ecossistemas_cobertos()) or "—"
+    if not achados:
+        print(f" Nenhum nome parecido com pacote popular ({cobertos}). ✅")
+        return
+    print(f"\n ⚠ {len(achados)} dependência(s) com nome parecido com pacote popular:")
+    for a in achados:
+        print(f"   [{a['severity'].upper():<6}] {a['ecosystem']}  {a['name']}@{a['version']}")
+        print(f"     {a['reason']}")
+
+
 def render_sca(sca: dict) -> None:
     print("\n" + "=" * 62)
     print(" raptor-win — SCA (dependências vulneráveis · OSV.dev)")
@@ -674,7 +736,19 @@ def render_sca(sca: dict) -> None:
         print(f" ⚠ OSV indisponível ({sca['error']}). {sca.get('deps', 0)} dependência(s) não checada(s).")
         return
     srcs = sca.get("sources", [])
-    print(f" fontes: {', '.join(dict.fromkeys(srcs)) or '—'}  ·  dependências verificadas: {sca.get('deps', 0)}")
+    pinados = sca.get("pinados", sca.get("deps", 0))
+    print(f" fontes: {', '.join(dict.fromkeys(srcs)) or '—'}  ·  "
+          f"dependências encontradas: {sca.get('deps', 0)}  ·  "
+          f"com versão fixada (checadas no OSV): {pinados}")
+    # Dizer o que NAO foi checado importa mais que o check verde: sem isto, um
+    # requirements.txt todo em `>=` exibia "nenhuma vulnerável ✅" sem que uma
+    # unica dependencia tivesse sido consultada.
+    sem_pin = sca.get("sem_pin", [])
+    if sem_pin:
+        amostra = ", ".join(sem_pin[:6]) + ("…" if len(sem_pin) > 6 else "")
+        print(f" ⚠ {len(sem_pin)} sem versão fixada — NÃO checadas contra CVE: {amostra}")
+        print("   (fixe com `==` ou gere um lock para que possam ser verificadas)")
+    _render_typosquat(sca.get("typosquat", []))
     hits = sca.get("vulns", {})
     if not hits:
         print(" Nenhuma dependência vulnerável conhecida. ✅")

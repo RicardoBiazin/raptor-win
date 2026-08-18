@@ -1,2 +1,2 @@
 # raptor-win só precisa do Semgrep (que traz suas próprias dependências).
-semgrep>=1.170
+semgrep>=1.172

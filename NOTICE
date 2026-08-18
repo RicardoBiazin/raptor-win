@@ -10,6 +10,14 @@ The Semgrep rule files under `rules/raptor/` are copied, unmodified, from RAPTOR
   Copyright (c) 2025-2026 Gadi Evron, Daniel Cuthbert, Thomas Dullien (Halvar Flake),
   Michael Bargury, John Cartwright
 
+The typosquat detection in `typosquat.py` is a port of RAPTOR's
+`packages/sca/supply_chain/typosquat.py` — the algorithm (Damerau-Levenshtein with
+a distance cap, the character-set prefilter and the length bucketing), the
+severity thresholds and the bundled data under `data/` (popularity feeds per
+ecosystem, the confusable denylist and the reviewed-legitimate allowlist) are
+RAPTOR's work, redistributed under the MIT License. The data is trimmed to the
+PyPI and npm ecosystems, which are the ones raptor-win parses.
+
 The full text of RAPTOR's licence is included at THIRD_PARTY/RAPTOR-LICENSE.txt.
 
 raptor-win is an independent wrapper and is NOT affiliated with or endorsed by the

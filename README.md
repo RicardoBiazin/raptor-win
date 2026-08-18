@@ -24,6 +24,7 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | Static analysis (Semgrep) | Run/execute any target code |
 | RAPTOR rules + Registry packs (auto by language) | Fuzzing, binary analysis, `rr` |
 | **Dependency scanning (SCA) via OSV.dev** (`--sca`) | Generate exploits or patches |
+| **Typosquat detection** on dependency names (`--sca`) | — |
 | **Secret scanning (`--secrets`)**, incl. secret files not in `.gitignore` | — |
 | De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
 | Console + Markdown + **SARIF** + raw JSON report | — |
