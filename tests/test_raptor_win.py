@@ -161,6 +161,30 @@ class TyposquatTests(unittest.TestCase):
         self.assertEqual(a["distance"], 0)
         self.assertEqual(a["nearest"], "lodash")
 
+    def test_trusted_scope_bare_name_is_silent(self):
+        """Escopo de organizacao conhecida nao e' squat, mesmo com nome nu igual.
+
+        `@types/lodash` TIPA o lodash: o nome nu igual ao popular e' a convencao
+        do DefinitelyTyped, nao um ataque. Sem esta excecao a checagem acusava a
+        arvore inteira de um projeto React em HIGH -- 57 achados num projeto,
+        quase todos `@types/*`, e um relatorio nesse estado ninguem le.
+        """
+        for nome in ("@types/d3-array", "@radix-ui/react-portal",
+                     "@alloc/quick-lru", "@babel/core"):
+            self.assertEqual(typosquat.escanear([("npm", nome, "1.0")]), [],
+                             f"{nome} nao deveria ser acusado")
+
+    def test_scoped_generic_subname_is_silent(self):
+        """`core`, `types`, `dom` a 1 edicao de `cors`, `type`, `dot`.
+
+        Nome generico de subpacote e' a regra em pacote com escopo. Comparar o
+        nome nu por APROXIMACAO gerava a maior parte do ruido; agora ele vale
+        apenas por igualdade exata, e so' fora dos escopos confiaveis.
+        """
+        for nome in ("@qualquer-escopo-novo/core", "@outro/types"):
+            self.assertEqual(typosquat.escanear([("npm", nome, "1.0")]), [],
+                             f"{nome} nao deveria ser acusado")
+
     def test_unique_internal_name_is_silent(self):
         self.assertEqual(
             typosquat.escanear([("PyPI", "meu-pacote-interno-xyz", "1.0")]), [])

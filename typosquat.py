@@ -103,6 +103,20 @@ def _popular_por_tamanho(eco: str) -> dict[int, list[tuple[str, int]]]:
     return _POPULAR_BY_LEN[eco]
 
 
+_ESCOPOS: dict[str, set[str]] = {}
+
+
+def _escopos_confiaveis(eco: str) -> set[str]:
+    """Escopos cujo nome nu nao vale como sinal de squat.
+
+    Cache por ecossistema: o arquivo e' lido uma vez por processo.
+    """
+    if eco not in _ESCOPOS:
+        dados = _ler_json(_DATA / "escopos-confiaveis.json") or {}
+        _ESCOPOS[eco] = {s.lower() for s in dados.get(eco, [])}
+    return _ESCOPOS[eco]
+
+
 def _lista(arquivo: str, cache: dict[str, set[str]], eco: str) -> set[str]:
     if eco not in cache:
         dados = _ler_json(_DATA / arquivo) or {}
@@ -169,10 +183,32 @@ def _checar(eco: str, nome: str, versao: str) -> dict | None:
     if n in _lista("allowlist.json", _ALLOWLIST, eco):
         return None
 
-    candidatos = [n]
+    # `@escopo/nome`: o nome nu vale APENAS por igualdade exata.
+    #
+    # Squat de escopo e' publicar `@mau/lodash` para se passar por `lodash` -- o
+    # nome nu bate EXATAMENTE com o popular. Comparar o nome nu por APROXIMACAO,
+    # como se fazia aqui, acusa meio ecossistema: `@dnd-kit/core` fica a 1 edicao
+    # de `cors`, `@chevrotain/types` a 1 de `type`, `@floating-ui/dom` a 1 de
+    # `dot`. Nome generico de subpacote (core, types, dom, utils, node) e' a regra
+    # em pacote com escopo, e nenhum deles esta' imitando ninguem.
+    #
+    # Medido em 21/08/2026 num projeto React: 80 dos 82 achados vinham daqui,
+    # todos em HIGH. Relatorio nesse estado nao e' lido, e a checagem inteira
+    # perde o valor -- que esta' em NAO gritar.
     if n.startswith("@") and "/" in n:
-        # `@escopo/nome`: o nome nu tambem entra, para pegar o squat de escopo.
-        candidatos.append(n.split("/", 1)[1])
+        escopo, nu = n.split("/", 1)
+        # Escopo de organizacao conhecida: o nome nu igual ao popular e' a
+        # CONVENCAO, nao ataque -- @types/lodash tipa o lodash. Ver
+        # data/escopos-confiaveis.json.
+        if escopo in _escopos_confiaveis(eco):
+            return None
+        if nu in _popular_set(eco):
+            return {"ecosystem": eco, "name": nome, "version": versao,
+                    "nearest": nu, "distance": 0, "severity": "high",
+                    "reason": (f"o nome nu bate com o popular '{nu}': "
+                               "formato de squat de escopo")}
+
+    candidatos = [n]
 
     baldes = _popular_por_tamanho(eco)
     melhor: tuple[int, str] | None = None
