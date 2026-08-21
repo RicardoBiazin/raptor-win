@@ -617,9 +617,26 @@ def run_sca(targets: list[Path]) -> "dict | None":
                 for dep in venv_deps:
                     dep_paths.setdefault(dep, str(t / ".venv"))
                 sources.append(".venv (instalados)")
-    # dedup preservando ordem
+    # DEDUP COM NOME NORMALIZADO (PEP 503), preservando ordem.
+    #
+    # Sem normalizar, o mesmo pacote entrava duas vezes quando vinha de duas
+    # fontes que escrevem o nome diferente: `requirements.txt` traz `Pillow`
+    # (como o autor digitou) e o `.dist-info` do venv traz `pillow`. Resultado
+    # medido em 21/08/2026: 26 advisories da Pillow contadas 2x, inflando o
+    # relatorio e o total de dependencias -- e dando a impressao de que o projeto
+    # tem mais problema do que tem.
+    #
+    # PEP 503: comparar nomes de pacote Python em minusculas, com `-`, `_` e `.`
+    # colapsados num unico `-`. Guardo a PRIMEIRA grafia vista, que e' a do
+    # arquivo do projeto, para o relatorio falar a lingua do usuario.
+    def _chave(dep: tuple[str, str, str]) -> tuple[str, str, str]:
+        eco, nome, ver = dep
+        if eco == "PyPI":
+            nome = re.sub(r"[-_.]+", "-", nome).lower()
+        return (eco, nome, ver)
+
     seen: set = set()
-    deps = [d for d in deps if not (d in seen or seen.add(d))]
+    deps = [d for d in deps if not (_chave(d) in seen or seen.add(_chave(d)))]
     if not deps:
         return {"sources": sources, "deps": 0, "vulns": {}}
     # O OSV exige versao exata; os sem pin ficam de fora DA CONSULTA, nunca do
