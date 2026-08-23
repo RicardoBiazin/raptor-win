@@ -1,0 +1,36 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Postgres/Supabase — EXECUTE de função concedido a `anon`/`PUBLIC`.
+  #
+  # NOT a RAPTOR rule. No Supabase, funções em `public` viram RPC na API REST
+  # (/rest/v1/rpc/<fn>). EXECUTE para `anon` (ou `PUBLIC`, que o anon herda)
+  # deixa qualquer visitante sem login chamá-la. Se for SECURITY DEFINER, ela
+  # roda com privilégios elevados — precisa autorizar o chamador por dentro.
+  # Confirme a intenção ou `REVOKE EXECUTE ... FROM public, anon` e conceda só
+  # aos papéis necessários.
+  # ---------------------------------------------------------------------------
+  - id: raptor.supabase.grant-execute-anon-public
+    message: >-
+      EXECUTE de função concedido a `anon`/`PUBLIC`: fica chamável sem login pela
+      API REST (/rest/v1/rpc/...). Se a função for SECURITY DEFINER, roda com
+      privilégios elevados — confirme que ela valida o chamador por dentro, ou
+      `REVOKE EXECUTE ... FROM public, anon` e conceda apenas aos papéis que
+      precisam (ex.: authenticated). Funções de gatilho (`tg_*`) nunca precisam
+      de EXECUTE de papel cliente.
+    languages: [generic]
+    severity: WARNING
+    paths:
+      include:
+        - "*.sql"
+    pattern-either:
+      - pattern: grant execute on function ... to public
+      - pattern: grant execute on function ... to anon
+      - pattern: grant execute on function ... to anon, authenticated
+      - pattern: grant execute on function ... to authenticated, anon
+    metadata:
+      cwe: ["CWE-732: Incorrect Permission Assignment for Critical Resource"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      references:
+        - https://supabase.com/docs/guides/database/database-linter?lint=0017_security_definer_function_public
+      tags: ["security", "supabase", "postgres", "rpc", "access-control"]
+      confidence: MEDIUM

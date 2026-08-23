@@ -1,0 +1,36 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Supabase / Postgres — VIEW com SECURITY DEFINER (security_invoker = false).
+  #
+  # NOT a RAPTOR rule. Authored for raptor-win from a real audit finding. Uma
+  # view SECURITY DEFINER roda com os privilégios do DONO da view e ignora o RLS
+  # de quem consulta — quem recebe SELECT lê o que o dono lê, passando por cima
+  # das policies de linha. Às vezes é intencional (uma view pública com colunas
+  # limitadas), mas precisa ser confirmado: nenhuma coluna sensível pode vazar.
+  #
+  # Generic mode (não é parser SQL): casa o token da opção da view. O linter do
+  # Supabase (0010_security_definer_view) reporta o mesmo.
+  # ---------------------------------------------------------------------------
+  - id: raptor.supabase.security-definer-view
+    message: >-
+      View criada com `security_invoker = false` (SECURITY DEFINER): executa com
+      os privilégios do DONO e IGNORA o RLS de quem consulta — qualquer papel com
+      SELECT lê tudo o que o dono lê, sem as policies de linha. Prefira
+      `security_invoker = true` e conceda ao papel só as linhas/colunas devidas.
+      Mantenha DEFINER apenas quando uma view pública de colunas limitadas for a
+      intenção explícita — e confirme que não expõe nada sensível.
+    languages: [generic]
+    severity: WARNING
+    paths:
+      include:
+        - "*.sql"
+    pattern-either:
+      - pattern: security_invoker = false
+      - pattern: security_invoker=false
+    metadata:
+      cwe: ["CWE-1220: Insufficient Granularity of Access Control"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      references:
+        - https://supabase.com/docs/guides/database/database-linter?lint=0010_security_definer_view
+      tags: ["security", "supabase", "postgres", "rls", "view", "access-control"]
+      confidence: HIGH

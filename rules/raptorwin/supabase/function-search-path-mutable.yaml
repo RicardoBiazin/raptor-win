@@ -1,0 +1,40 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Postgres/Supabase — função SECURITY DEFINER sem `SET search_path`.
+  #
+  # NOT a RAPTOR rule. Uma função DEFINER sem search_path fixo resolve nomes não
+  # qualificados pelo search_path de QUEM chama — um atacante que plante um objeto
+  # num schema anterior no path faz a função executar o objeto dele com os
+  # privilégios do dono (sequestro de search_path). Corrige-se com
+  # `SET search_path = ...` (ou `= ''`) na definição.
+  #
+  # Heurística em generic mode: casa `security definer` que NÃO tenha
+  # `set search_path` no MESMO comando `create ... function ... as $$`. O
+  # `pattern-inside` limita ao corpo do create (do `function` até o delimitador
+  # `$$`), então o search_path de OUTRA função não suprime este achado.
+  # ---------------------------------------------------------------------------
+  - id: raptor.supabase.function-search-path-mutable
+    message: >-
+      Função SECURITY DEFINER sem `SET search_path`: nomes não qualificados são
+      resolvidos pelo search_path de quem chama — brecha de sequestro (um objeto
+      plantado num schema anterior no path roda com os privilégios do dono).
+      Fixe o path na definição: `... SECURITY DEFINER SET search_path = '' AS $$`
+      (ou `= public, pg_temp`), qualificando as referências que precisar.
+    languages: [generic]
+    severity: WARNING
+    paths:
+      include:
+        - "*.sql"
+    patterns:
+      - pattern: security definer
+      - pattern-inside: |
+          function ... $$
+      - pattern-not-inside: |
+          function ... set search_path ... $$
+    metadata:
+      cwe: ["CWE-426: Untrusted Search Path"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      references:
+        - https://supabase.com/docs/guides/database/database-linter?lint=0011_function_search_path_mutable
+      tags: ["security", "supabase", "postgres", "search-path", "privilege-escalation"]
+      confidence: MEDIUM

@@ -1,0 +1,37 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Postgres/Supabase — RLS "Auth Initialization Plan" (performance).
+  #
+  # NOT a RAPTOR rule. Quando uma policy chama `auth.uid()`/`auth.role()`/
+  # `auth.jwt()` direto, o Postgres reavalia a função UMA VEZ POR LINHA. Envolver
+  # em subselect — `(select auth.uid())` — deixa o planner cachear um resultado
+  # só, o que acelera muito em tabelas grandes. Mesma semântica, só desempenho.
+  #
+  # Escopo em generic mode: só dentro de `using (...)` / `with check (...)` (as
+  # cláusulas de policy), e exclui a forma já correta `(select auth.uid())`.
+  # ---------------------------------------------------------------------------
+  - id: raptor.supabase.rls-init-auth-uid
+    message: >-
+      RLS policy chama auth.uid()/auth.role()/auth.jwt() diretamente — reavaliado
+      por LINHA. Envolva em subselect para o planner cachear:
+      `(select auth.uid())`. (Supabase: "Auth RLS Initialization Plan".)
+    languages: [generic]
+    severity: INFO
+    paths:
+      include:
+        - "*.sql"
+    patterns:
+      - pattern-either:
+          - pattern: using (...)
+          - pattern: with check (...)
+      - pattern-either:
+          - pattern-regex: "auth\\.uid\\(\\)"
+          - pattern-regex: "auth\\.role\\(\\)"
+          - pattern-regex: "auth\\.jwt\\(\\)"
+      - pattern-not-regex: "\\(\\s*select\\s+auth\\.(uid|role|jwt)\\(\\)"
+    metadata:
+      cwe: ["CWE-1050: Excessive Platform Resource Consumption within a Loop"]
+      references:
+        - https://supabase.com/docs/guides/database/postgres/row-level-security#call-functions-with-select
+      tags: ["performance", "supabase", "postgres", "rls"]
+      confidence: MEDIUM

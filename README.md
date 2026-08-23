@@ -195,4 +195,12 @@ Static analysis reports *possibilities*; you still validate exploitability.
   - `supabase/rls-anon-select` — Postgres/Supabase Row Level Security `SELECT` policy granted to the
     `anon` role. RLS filters rows, not columns, so every column of the matching rows is world-readable
     (stock, cost, internal codes, PII). Flags the pattern for review; the fix is a column-limited view.
+  - `supabase/security-definer-view` — view created `WITH (security_invoker = false)` (SECURITY
+    DEFINER): runs as the owner and bypasses the querying user's RLS. Prefer `security_invoker = true`.
+  - `supabase/function-search-path-mutable` — `SECURITY DEFINER` function with no `SET search_path`,
+    open to search-path hijacking. Fix: pin `SET search_path = '' ` (or an explicit schema list).
+  - `supabase/grant-execute-anon-public` — `EXECUTE` on a function granted to `anon`/`PUBLIC`, making
+    it callable unauthenticated via the REST RPC API; risky when the function is `SECURITY DEFINER`.
+  - `supabase/rls-init-auth-uid` — performance: RLS policy calls `auth.uid()`/`auth.role()`/`auth.jwt()`
+    directly (re-evaluated per row); wrap as `(select auth.uid())` so the planner caches it.
 - Semgrep and its Registry packs are © r2c/Semgrep, used per their terms.

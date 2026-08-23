@@ -1,13 +1,50 @@
--- Fixture de teste do raptor-win (NÃO é banco real).
--- Row Level Security (Postgres/Supabase): uma policy de SELECT liberada para o
--- papel `anon` expõe TODAS AS COLUNAS das linhas que casam — RLS filtra linha,
--- nunca coluna. Um menu público que só precisa de nome/preço acaba entregando
--- também estoque, custo e códigos internos a qualquer visitante.
+-- Fixture de teste do raptor-win (NÃO é banco real; nomes genéricos).
+-- Padrões de segurança/performance em Postgres/Supabase. Os casos marcados
+-- "(ok)" são a forma correta e NÃO devem gerar achado.
+
+-- ── RLS: SELECT liberado ao papel anônimo ─────────────────────────────────
+-- RLS filtra LINHA, nunca COLUNA: uma policy de SELECT para `anon` entrega
+-- todas as colunas das linhas que casam (estoque, custo, códigos, PII).
 
 -- Caso 1: tabela inteira aberta ao anônimo (using (true)).
-create policy mesas_select on public.mesas
+create policy t1_select on public.tabela_um
   for select to anon, authenticated using (true);
 
 -- Caso 2: filtrada por linha, mas ainda todas as colunas das linhas ativas.
-create policy cardapio_select_anon on public.itens_cardapio
+create policy t2_select_anon on public.tabela_dois
   for select to anon using (ativo = true);
+
+-- ── VIEW SECURITY DEFINER ─────────────────────────────────────────────────
+-- Roda com os privilégios do dono e ignora o RLS de quem consulta.
+create view public.view_exemplo with (security_invoker = false) as
+  select id, nome, preco from public.tabela_dois where ativo;
+
+-- View correta (ok): security_invoker = true.
+create view public.view_ok with (security_invoker = true) as
+  select id, nome, preco from public.tabela_dois where ativo;
+
+-- ── Função SECURITY DEFINER sem search_path fixo ──────────────────────────
+create or replace function public.fn_touch()
+returns trigger language plpgsql security definer as $$
+begin new.updated_at := now(); return new; end; $$;
+
+-- Função SECURITY DEFINER COM search_path (ok).
+create or replace function public.fn_touch_ok()
+returns trigger language plpgsql security definer
+set search_path = public, pg_temp as $$
+begin new.updated_at := now(); return new; end; $$;
+
+-- ── EXECUTE de função exposto a anon/PUBLIC (vira RPC pública) ─────────────
+grant execute on function public.fn_admin(uuid) to anon;
+grant execute on function public.fn_setup() to public;
+
+-- Grant só a authenticated (ok).
+grant execute on function public.fn_do_usuario() to authenticated;
+
+-- ── RLS init plan (performance): auth.uid() reavaliado por linha ───────────
+create policy p_meu on public.tabela_tres
+  for select to authenticated using (user_id = auth.uid());
+
+-- Forma cacheável (ok): auth.uid() dentro de um subselect.
+create policy p_ok on public.tabela_tres
+  for select to authenticated using (user_id = (select auth.uid()));
