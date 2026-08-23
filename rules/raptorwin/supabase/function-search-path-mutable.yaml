@@ -12,6 +12,14 @@ rules:
   # `set search_path` no MESMO comando `create ... function ... as $$`. O
   # `pattern-inside` limita ao corpo do create (do `function` até o delimitador
   # `$$`), então o search_path de OUTRA função não suprime este achado.
+  #
+  # A OUTRA METADE mora em `sql_lint.py`, como `sql.search-path-missing-pg-temp`:
+  # esta regra só exige que o `set search_path` EXISTA, então `= public` passa
+  # limpo por aqui e continua sequestrável (sem `pg_temp` na lista, o Postgres o
+  # procura PRIMEIRO para nomes de relação). As duas são complementares por
+  # construção — uma exige o atributo ausente, a outra exige que esteja presente
+  # — então nunca acusam a mesma função. A posição do `pg_temp` numa lista de
+  # valores é justamente o que o modo generic não consegue expressar.
   # ---------------------------------------------------------------------------
   - id: raptor.supabase.function-search-path-mutable
     message: >-

@@ -201,6 +201,8 @@ Static analysis reports *possibilities*; you still validate exploitability.
     DEFINER): runs as the owner and bypasses the querying user's RLS. Prefer `security_invoker = true`.
   - `supabase/function-search-path-mutable` — `SECURITY DEFINER` function with no `SET search_path`,
     open to search-path hijacking. Fix: pin `SET search_path = '' ` (or an explicit schema list).
+    The *other half* is `sql.search-path-missing-pg-temp` in `sql_lint.py`: this rule only requires
+    that a `SET search_path` **exist**, so `= public` passes here and is still hijackable.
   - `supabase/grant-execute-anon-public` — `EXECUTE` on a function granted to `anon`/`PUBLIC`, making
     it callable unauthenticated via the REST RPC API; risky when the function is `SECURITY DEFINER`.
   - `supabase/rls-init-auth-uid` — performance: RLS policy calls `auth.uid()`/`auth.role()`/`auth.jwt()`
@@ -220,4 +222,32 @@ Static analysis reports *possibilities*; you still validate exploitability.
     role clears the finding. Dynamic targets (`format('revoke ... %s ...')` inside a `DO` block)
     are skipped — the identity isn't knowable by regex.
     This is the first `sql_lint` check above `INFO`: `--fail-on HIGH` can now fail on SQL.
+  - `sql.search-path-missing-pg-temp` — `SECURITY DEFINER` function whose `SET search_path`
+    **omits `pg_temp`**. This satisfies the Semgrep rule above and is still hijackable: when
+    `pg_temp` is not named in the list, Postgres searches it **first** for RELATION names, so a
+    planted `pg_temp.<table>` shadows the real table inside the DEFINER body and is read with the
+    owner's privileges. Fix: `SET search_path = <list>, pg_temp` (pg_temp **last**), or `= ''` with
+    a fully-qualified body. `= ''` and `= pg_catalog` are legitimate and never flagged. A separate
+    `INFO` variant fires when `pg_temp` is present but not last — order *is* name resolution.
+  - `sql.security-definer-tenant-param` (**ERROR**) — `SECURITY DEFINER` function that takes the
+    tenant as a **parameter** (`p_org uuid`, `tenant_id`, `company_id`, …) while its body derives
+    nothing from the session. The caller picks the parameter, so anyone holding another tenant's id
+    reads that tenant's data with the owner's privileges, and RLS does not intervene because the
+    function is DEFINER. Requires all three — DEFINER, a tenant-shaped parameter, and **no** session
+    marker (`auth.uid()`, `current_setting('request.jwt…')`, a `my_org()`/`is_admin()` helper) — so
+    the correct pattern (take `p_org`, validate it against the session) is not flagged.
+  - `sql.security-definer-guard-null-uid` — guard gated on `auth.uid() is not null`: the path with
+    **no** session (service_role, cron, an anonymous call) never reaches the check, so the exception
+    is never raised. If a system caller is meant to pass, test for it explicitly instead of treating
+    "no uid" as trusted.
+  - `sql.supabase.execute-nunca-fechado` — `SECURITY DEFINER` function that **no** `GRANT`/`REVOKE
+    EXECUTE` mentions in any file: on Supabase it is born callable by `anon`, because the platform
+    runs `ALTER DEFAULT PRIVILEGES … GRANT EXECUTE ON FUNCTIONS TO anon, authenticated`. Closing
+    once in bulk does not hold — `REVOKE … ON ALL FUNCTIONS IN SCHEMA` only reaches what already
+    exists, so the next migration is born open again; only `ALTER DEFAULT PRIVILEGES … REVOKE`
+    reaches the future, and the check models that asymmetry by file order. Trigger functions are
+    excluded (not directly callable). Functions called from inside a policy expression are reported
+    at `INFO` with a **different** message: policies are evaluated with the *querying* role's
+    privileges, so revoking from `authenticated` breaks every query on the table with "permission
+    denied for function" — the message is the mitigation, not the heuristic.
 - Semgrep and its Registry packs are © r2c/Semgrep, used per their terms.

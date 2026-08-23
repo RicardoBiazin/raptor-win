@@ -45,6 +45,33 @@ jobs:
           echo '--- report ---'; cat report.md
           # o scanner tem de ter achado ao menos uma vulnerabilidade nas amostras
           grep -Eq 'CRITICAL|ERROR|HIGH|WARNING' report.md
+      - name: Cada regra .sql precisa disparar de verdade
+        run: |
+          # O smoke acima passa se QUALQUER regra achar QUALQUER coisa, então uma
+          # regra .sql podia parar de casar — mudança no generic mode, fixture
+          # editada, refator do sql_lint — sem quebrar a build. Aqui cada id é
+          # exigido pelo nome.
+          #
+          # A afirmação é sobre report.md, e não sobre findings.json, porque
+          # --json-out grava o JSON BRUTO do Semgrep: os achados do sql_lint não
+          # estão nele. E nunca sobre a contagem de "exigem atenção": tudo em
+          # sample_vuln/ casa FIXTURE_VULN_RE e sai dessa conta de propósito.
+          # O nome cobrado é o curto, porque é o que short_rule() imprime.
+          faltando=""
+          regras="rls-anon-select security-definer-view function-search-path-mutable
+                  grant-execute-anon-public rls-init-auth-uid duplicate-index
+                  multiple-permissive-policies revoke-incompleto
+                  search-path-missing-pg-temp security-definer-tenant-param
+                  security-definer-guard-null-uid execute-nunca-fechado"
+          for regra in $regras
+          do
+            grep -q "\`$regra\`" report.md || faltando="$faltando $regra"
+          done
+          if [ -n "$faltando" ]; then
+            echo "regras que deviam disparar em sample_vuln e nao dispararam:$faltando"
+            exit 1
+          fi
+          echo "as 12 regras .sql dispararam"
       - name: As regras do registro precisam ter carregado
         run: |
           # O passo anterior passa mesmo se NENHUM pacote do registro

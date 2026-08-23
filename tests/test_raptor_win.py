@@ -313,6 +313,202 @@ class SqlLintTests(unittest.TestCase):
         self.assertNotIn("sql.multiple-permissive-policies", rules)
 
 
+SEARCH_PATH = "sql.search-path-missing-pg-temp"
+TENANT_PARAM = "sql.security-definer-tenant-param"
+GUARDA_NULL = "sql.security-definer-guard-null-uid"
+NUNCA_FECHADO = "sql.supabase.execute-nunca-fechado"
+
+
+class MultiArquivoMixin:
+    """Grava vários .sql num tempdir — as checagens de EXECUTE cruzam arquivos."""
+
+    def _scan(self, *arquivos: str) -> list[dict]:
+        import sql_lint
+        with tempfile.TemporaryDirectory() as td:
+            caminhos = []
+            for i, sql in enumerate(arquivos):
+                f = Path(td) / f"{i:04d}_m.sql"
+                f.write_text(sql, encoding="utf-8")
+                caminhos.append(f)
+            return sql_lint.escanear(caminhos, set())
+
+    def _rules(self, *arquivos: str) -> list[str]:
+        return [a["rule"] for a in self._scan(*arquivos)]
+
+
+# Molde de função DEFINER: (assinatura, cabeçalho, corpo).
+DEF = ("create or replace function public.fn_x(%s)\n"
+       "returns integer language plpgsql security definer\n"
+       "%s as $$ begin %s return 1; end; $$;\n")
+
+
+class SearchPathPgTempTests(MultiArquivoMixin, unittest.TestCase):
+    """`set search_path` presente mas sem `pg_temp`.
+
+    A regra do Semgrep só exige que o search_path EXISTA, então `= public`
+    passa limpo por lá. As duas checagens são complementares por construção:
+    uma exige o `set search_path` ausente, esta exige que esteja presente.
+    """
+
+    def test_sem_pg_temp_acusa(self):
+        self.assertIn(SEARCH_PATH, self._rules(DEF % ("", "set search_path = public", "")))
+
+    def test_com_pg_temp_ok(self):
+        self.assertNotIn(SEARCH_PATH,
+                         self._rules(DEF % ("", "set search_path = public, pg_temp", "")))
+
+    def test_path_vazio_ok(self):
+        self.assertNotIn(SEARCH_PATH, self._rules(DEF % ("", "set search_path = ''", "")))
+
+    def test_pg_catalog_ok(self):
+        self.assertNotIn(SEARCH_PATH,
+                         self._rules(DEF % ("", "set search_path = pg_catalog", "")))
+
+    def test_pg_temp_fora_de_ordem_e_info(self):
+        achados = [a for a in self._scan(DEF % ("", "set search_path = pg_temp, public", ""))
+                   if a["rule"] == SEARCH_PATH]
+        self.assertEqual(len(achados), 1)
+        self.assertEqual(achados[0]["severity"], "INFO")
+
+    def test_invoker_nao_acusa(self):
+        sql = ("create or replace function public.fn_i() returns int language sql\n"
+               "set search_path = public as $$ select 1 $$;\n")
+        self.assertNotIn(SEARCH_PATH, self._rules(sql))
+
+    def test_search_path_de_outra_funcao_nao_suprime(self):
+        """O cabeçalho da função vizinha não pode calar o achado desta."""
+        sql = (DEF % ("", "set search_path = public, pg_temp", "")).replace("fn_x", "fn_boa")
+        sql += (DEF % ("", "set search_path = public", "")).replace("fn_x", "fn_ma")
+        achados = [a for a in self._scan(sql) if a["rule"] == SEARCH_PATH]
+        self.assertEqual(len(achados), 1)
+        self.assertIn("fn_ma", achados[0]["message"])
+
+
+class TenantParamTests(MultiArquivoMixin, unittest.TestCase):
+    """DEFINER que recebe o inquilino por parâmetro sem conferir a sessão.
+
+    O falso positivo a evitar é o padrão CORRETO: receber `p_org` e validá-lo
+    contra a sessão. Por isso a checagem exige as três coisas — DEFINER,
+    parâmetro com forma de inquilino e ausência total de marcador de sessão.
+    """
+
+    def test_tenant_param_acusa_como_error(self):
+        achados = [a for a in self._scan(
+            DEF % ("p_org uuid", "set search_path = public, pg_temp", ""))
+            if a["rule"] == TENANT_PARAM]
+        self.assertEqual(len(achados), 1)
+        self.assertEqual(achados[0]["severity"], "ERROR")
+
+    def test_com_auth_uid_no_corpo_ok(self):
+        corpo = "perform 1 from t where u = auth.uid();"
+        self.assertNotIn(TENANT_PARAM, self._rules(
+            DEF % ("p_org uuid", "set search_path = public, pg_temp", corpo)))
+
+    def test_com_helper_my_org_ok(self):
+        corpo = "perform 1 from t where org = my_org();"
+        self.assertNotIn(TENANT_PARAM, self._rules(
+            DEF % ("p_org uuid", "set search_path = public, pg_temp", corpo)))
+
+    def test_invoker_com_tenant_param_ok(self):
+        sql = ("create or replace function public.fn_i(p_org uuid) returns int\n"
+               "language sql set search_path = public, pg_temp as $$ select 1 $$;\n")
+        self.assertNotIn(TENANT_PARAM, self._rules(sql))
+
+    def test_param_que_nao_e_tenant_ok(self):
+        self.assertNotIn(TENANT_PARAM, self._rules(
+            DEF % ("p_valor numeric", "set search_path = public, pg_temp", "")))
+
+    def test_numeric_com_virgula_nao_quebra_assinatura(self):
+        """`numeric(10,2)` não pode virar dois parâmetros."""
+        args = "p_v numeric(10,2), p_org uuid"
+        achados = [a for a in self._scan(
+            DEF % (args, "set search_path = public, pg_temp", ""))
+            if a["rule"] == TENANT_PARAM]
+        self.assertEqual(len(achados), 1)
+        self.assertIn("p_org uuid", achados[0]["message"])
+
+    def test_gatilho_nao_acusa(self):
+        sql = ("create or replace function public.fn_t() returns trigger language plpgsql\n"
+               "security definer set search_path = public, pg_temp as $$\n"
+               "begin return new; end; $$;\n")
+        self.assertNotIn(TENANT_PARAM, self._rules(sql))
+
+
+class GuardaNullUidTests(MultiArquivoMixin, unittest.TestCase):
+    def test_guarda_condicionada_acusa(self):
+        corpo = "if auth.uid() is not null and not is_admin() then raise exception 'nao'; end if;"
+        self.assertIn(GUARDA_NULL, self._rules(
+            DEF % ("", "set search_path = public, pg_temp", corpo)))
+
+    def test_guarda_incondicional_ok(self):
+        corpo = "if not is_admin() then raise exception 'nao'; end if;"
+        self.assertNotIn(GUARDA_NULL, self._rules(
+            DEF % ("", "set search_path = public, pg_temp", corpo)))
+
+
+class ExecuteNuncaFechadoTests(MultiArquivoMixin, unittest.TestCase):
+    """DEFINER que nenhum grant/revoke cita — no Supabase nasce aberta a `anon`.
+
+    A carve-out do helper de policy não é opcional: recomendar revogar de
+    `authenticated` uma função chamada de dentro de policy derruba toda query
+    na tabela com "permission denied for function".
+    """
+
+    CRIA = ("create or replace function public.helper_x(p_id uuid)\n"
+            "returns boolean language sql security definer\n"
+            "set search_path = public, pg_temp as $$ select true $$;\n")
+
+    def test_sem_grant_nenhum_acusa(self):
+        self.assertIn(NUNCA_FECHADO, self._rules(self.CRIA))
+
+    def test_grant_em_outro_arquivo_suprime(self):
+        """Prova a passada entre arquivos: o create numa migração, o grant noutra."""
+        self.assertNotIn(NUNCA_FECHADO, self._rules(
+            self.CRIA, "grant execute on function public.helper_x(uuid) to authenticated;\n"))
+
+    def test_revoke_em_outro_arquivo_suprime(self):
+        self.assertNotIn(NUNCA_FECHADO, self._rules(
+            self.CRIA, "revoke execute on function public.helper_x(uuid) from public, anon;\n"))
+
+    def test_revoke_em_bloco_anterior_nao_suprime(self):
+        """A regressão real: fechar tudo em bloco e criar a função DEPOIS.
+
+        `revoke ... on all functions in schema` só alcança o que já existe, então
+        a migração seguinte nasce aberta de novo — e ninguém liga uma coisa à outra.
+        """
+        self.assertIn(NUNCA_FECHADO, self._rules(
+            "revoke execute on all functions in schema public from public, anon;\n",
+            self.CRIA))
+
+    def test_revoke_em_bloco_posterior_suprime(self):
+        self.assertNotIn(NUNCA_FECHADO, self._rules(
+            self.CRIA,
+            "revoke execute on all functions in schema public from public, anon;\n"))
+
+    def test_default_privileges_anterior_suprime(self):
+        """Só `alter default privileges` alcança o que vem depois."""
+        self.assertNotIn(NUNCA_FECHADO, self._rules(
+            "alter default privileges in schema public revoke execute on functions from public;\n",
+            self.CRIA))
+
+    def test_gatilho_nao_exige_grant(self):
+        sql = ("create or replace function public.fn_t() returns trigger language plpgsql\n"
+               "security definer set search_path = public, pg_temp as $$\n"
+               "begin return new; end; $$;\n")
+        self.assertNotIn(NUNCA_FECHADO, self._rules(sql))
+
+    def test_helper_de_policy_sai_como_info_e_avisa(self):
+        achados = [a for a in self._scan(
+            self.CRIA,
+            "create policy p on public.t for select to authenticated\n"
+            "  using (helper_x(id));\n") if a["rule"] == NUNCA_FECHADO]
+        self.assertEqual(len(achados), 1)
+        self.assertEqual(achados[0]["severity"], "INFO")
+        # O texto É o valor deste ramo: sem ele, a recomendação derruba a produção.
+        self.assertIn("authenticated", achados[0]["message"])
+        self.assertIn("permission denied", achados[0]["message"])
+
+
 REVOKE_INCOMPLETO = "sql.supabase.revoke-incompleto"
 
 
