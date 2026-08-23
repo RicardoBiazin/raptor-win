@@ -11,6 +11,10 @@ Detecta:
     avalia TODAS por linha e combina com OR — dá para consolidar numa só.
     (Supabase: "Multiple Permissive Policies".) Policies `as restrictive` não
     entram (elas combinam com AND, propósito diferente).
+  * REVOKE de EXECUTE que fecha `public`/`anon` e ESQUECE `authenticated`, sem
+    nenhum GRANT deliberado para esse papel. Correlaciona comandos de ARQUIVOS
+    diferentes — o create, o revoke e o grant da mesma função costumam morar em
+    migrações separadas.
 
 Saída: lista de dicts {rule, severity, path, line, message} — o mesmo formato de
 `secrets_scan`, para entrar na mesma lista do relatório.
@@ -40,6 +44,25 @@ _RE_TO = re.compile(r"\bto\s+(?P<roles>[\w\s,\"]+?)(?=\busing\b|\bwith\b|$)", re
 _RE_FOR = re.compile(r"\bfor\s+(select|insert|update|delete|all)\b", re.IGNORECASE)
 _RE_WHERE = re.compile(r"\bwhere\b(?P<w>.*)", re.IGNORECASE | re.DOTALL)
 
+# EXECUTE de função concedido/revogado. O alvo é `.+?` e não `[\w.]+` porque a
+# lista de argumentos quebra linha entre o nome e o `from`/`to` — casar só até o
+# fim da linha perderia justamente as assinaturas longas, que são as das funções
+# que mais importam.
+_RE_REVOKE_EXEC = re.compile(
+    r"\brevoke\s+(?:all\s+privileges|all|execute)\s+on\s+function\s+"
+    r"(?P<alvo>.+?)\s+from\s+(?P<papeis>[^;]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+_RE_GRANT_EXEC = re.compile(
+    r"\bgrant\s+(?:all\s+privileges|all|execute)\s+on\s+function\s+"
+    r"(?P<alvo>.+?)\s+to\s+(?P<papeis>[^;]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+# Nome de função literal: sem schema, sem aspas. Serve de filtro para descartar
+# alvo dinâmico (`%s` de um `format()` dentro de bloco DO), cuja identidade não
+# dá para saber por regex.
+_RE_NOME_SIMPLES = re.compile(r"^[a-z_][a-z0-9_$]*$")
+
 
 def _linha(texto: str, pos: int) -> int:
     return texto.count("\n", 0, pos) + 1
@@ -68,6 +91,98 @@ def _papeis_efetivos(roles_txt: str | None) -> set[str]:
 def _acoes_de(cmd: str | None) -> set[str]:
     c = (cmd or "all").lower()
     return set(_ACOES) if c == "all" else {c}
+
+
+def _chave_funcao(alvo: str) -> tuple[str, str] | None:
+    """`public.fn_x(uuid, text)` -> ('fn_x', 'uuid, text'). None se não for literal.
+
+    O schema sai da chave de propósito: o mesmo repositório escreve ora
+    `public.fn_x(...)`, ora `fn_x(...)`, e tratá-los como funções diferentes
+    faria o GRANT de um lado não cancelar o REVOKE do outro — que é exatamente
+    o falso positivo que esta checagem existe para não produzir.
+    """
+    alvo = alvo.strip()
+    abre = alvo.find("(")
+    nome_txt = alvo if abre < 0 else alvo[:abre]
+    args = "" if abre < 0 else alvo[abre + 1:alvo.rfind(")")] if alvo.rfind(")") > abre else ""
+    nome = _norm(nome_txt).split(".")[-1].strip('"')
+    if not _RE_NOME_SIMPLES.match(nome):
+        return None
+    return nome, _norm(args)
+
+
+def _papeis_listados(txt: str) -> set[str]:
+    """Papéis de um `from`/`to`, ignorando o que não for identificador simples."""
+    papeis = set()
+    for parte in txt.split(","):
+        p = _norm(parte).strip('"')
+        if re.fullmatch(r"[a-z_][a-z0-9_]*", p):
+            papeis.add(p)
+    return papeis
+
+
+def _coletar_execute(texto: str, rel: str, revogados: dict, concedidos: dict) -> None:
+    """Acumula, POR FUNÇÃO, a união dos papéis revogados e concedidos.
+
+    União, e não statement a statement: a correção de um revoke incompleto
+    costuma ser um `revoke` NOVO numa migração posterior, com o repositório
+    guardando os dois. Avaliando cada comando isolado, o repositório já
+    corrigido continuaria acusando para sempre.
+    """
+    for m in _RE_REVOKE_EXEC.finditer(texto):
+        chave = _chave_funcao(m.group("alvo"))
+        if chave is None:
+            continue
+        papeis = _papeis_listados(m.group("papeis"))
+        if not papeis:
+            continue
+        atual = revogados.setdefault(chave, {"papeis": set(), "path": rel, "line": 0})
+        atual["papeis"] |= papeis
+        # Fica com a ÚLTIMA ocorrência: é a linha onde o papel que falta seria
+        # acrescentado, não a do comando histórico que já foi superado.
+        atual["path"], atual["line"] = rel, _linha(texto, m.start())
+
+    for m in _RE_GRANT_EXEC.finditer(texto):
+        chave = _chave_funcao(m.group("alvo"))
+        if chave is None:
+            continue
+        concedidos.setdefault(chave, set())
+        concedidos[chave] |= _papeis_listados(m.group("papeis"))
+
+
+def _achados_revoke_incompleto(revogados: dict, concedidos: dict) -> list[dict]:
+    achados: list[dict] = []
+    for (nome, args), info in revogados.items():
+        papeis = info["papeis"]
+        if not (papeis & {"public", "anon"}):
+            continue          # não é uma tentativa de fechar o acesso de cliente
+        if "authenticated" in papeis:
+            continue          # fechou o papel que importa
+        if "authenticated" in concedidos.get((nome, args), set()):
+            continue          # acesso deliberado: é RPC de app, o padrão correto
+        assinatura = f"{nome}({args})" if args else f"{nome}()"
+        achados.append({
+            "rule": "sql.supabase.revoke-incompleto",
+            "severity": "HIGH",
+            "context": "",
+            "path": info["path"],
+            "line": info["line"],
+            "message": (
+                f"`revoke execute on function {assinatura}` fecha "
+                f"{', '.join(sorted(papeis & {'public', 'anon'}))} mas não "
+                f"`authenticated`, e não há GRANT para esse papel em lugar nenhum. "
+                f"No Supabase isso NÃO fecha o acesso: o projeto roda "
+                f"`alter default privileges ... grant execute on functions to anon, "
+                f"authenticated`, então cada função nasce com um grant PRÓPRIO para "
+                f"`authenticated` — que `revoke ... from public` não desfaz. Qualquer "
+                f"usuário logado continua chamando por /rest/v1/rpc/{nome}. Se a função "
+                f"é SECURITY DEFINER e recebe o id do inquilino por argumento em vez de "
+                f"deduzi-lo da sessão, isso é escrita entre inquilinos. Acrescente "
+                f"`authenticated` à lista do revoke; se o acesso for intencional, "
+                f"escreva o GRANT explícito para registrar a intenção."
+            ),
+        })
+    return achados
 
 
 def _arquivos_sql(alvos: list[Path], skip_dirs: set[str]) -> list[Path]:
@@ -161,7 +276,13 @@ def _achados_policies(texto: str, rel: str) -> list[dict]:
 
 
 def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
+    # Duas fases: índice e policy se resolvem dentro de um arquivo, mas o
+    # EXECUTE de uma função se decide entre migrações — o revoke numa, o grant
+    # noutra. Só dá para julgar depois de ler todas.
     achados: list[dict] = []
+    revogados: dict[tuple[str, str], dict] = {}
+    concedidos: dict[tuple[str, str], set[str]] = {}
+
     for arq in _arquivos_sql(alvos, skip_dirs):
         try:
             texto = arq.read_text(encoding="utf-8", errors="ignore")
@@ -173,5 +294,8 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
             rel = str(arq).replace("\\", "/")
         achados += _achados_indices(texto, rel)
         achados += _achados_policies(texto, rel)
+        _coletar_execute(texto, rel, revogados, concedidos)
+
+    achados += _achados_revoke_incompleto(revogados, concedidos)
     achados.sort(key=lambda a: (a["path"], a["line"]))
     return achados

@@ -74,8 +74,10 @@ Windows launcher (puts `semgrep` on PATH automatically):
   content scanners don't do:
 
   1. **Credential patterns** in file contents — private keys, AWS/GitHub/Slack/Stripe/Google
-     tokens, Supabase `sb_secret_`, OpenAI `sk-`, Groq `gsk_`, NVIDIA `nvapi-`, JWTs, passwords
-     embedded in connection strings, plus long literals assigned to secret-looking names.
+     tokens, Supabase `sb_secret_` (project scope) and `sbp_` (personal access token — scoped to
+     the whole **account**: creates and deletes projects, reads secrets), OpenAI `sk-`, Groq
+     `gsk_`, NVIDIA `nvapi-`, JWTs, passwords embedded in connection strings, plus long literals
+     assigned to secret-looking names.
   2. **Secret-bearing files that git isn't ignoring.** A `.env` outside `.gitignore` hasn't
      leaked *yet* — it leaks on the next `git add -A`, and by then the only real fix is rotating
      the credential. This check asks git directly, so it can't false-positive.
@@ -208,4 +210,14 @@ Static analysis reports *possibilities*; you still validate exploitability.
   - `sql.duplicate-index` — two `create index` on the same table with identical columns/uniqueness.
   - `sql.multiple-permissive-policies` — more than one PERMISSIVE policy for the same table+action+role
     (Postgres ORs them per row); consolidate into one. `RESTRICTIVE` policies are excluded.
+  - `sql.supabase.revoke-incompleto` (**HIGH**) — `REVOKE EXECUTE ON FUNCTION` that closes
+    `public`/`anon` but omits `authenticated`, with no deliberate `GRANT ... TO authenticated`
+    anywhere. Supabase runs `ALTER DEFAULT PRIVILEGES ... GRANT EXECUTE ON FUNCTIONS TO anon,
+    authenticated`, so every function is born with its **own** grant to `authenticated` that
+    `REVOKE ... FROM public` does not undo — the function stays callable by any signed-in user.
+    Correlates `REVOKE`/`GRANT` **across files** (they usually live in different migrations) and
+    unions the roles of every `REVOKE` for a function, so a later migration that adds the missing
+    role clears the finding. Dynamic targets (`format('revoke ... %s ...')` inside a `DO` block)
+    are skipped — the identity isn't knowable by regex.
+    This is the first `sql_lint` check above `INFO`: `--fail-on HIGH` can now fail on SQL.
 - Semgrep and its Registry packs are © r2c/Semgrep, used per their terms.

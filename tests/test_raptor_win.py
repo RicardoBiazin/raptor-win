@@ -313,5 +313,102 @@ class SqlLintTests(unittest.TestCase):
         self.assertNotIn("sql.multiple-permissive-policies", rules)
 
 
+REVOKE_INCOMPLETO = "sql.supabase.revoke-incompleto"
+
+
+class RevokeIncompletoTests(unittest.TestCase):
+    """REVOKE que fecha public/anon e esquece `authenticated`.
+
+    O falso positivo a evitar é o padrão CORRETO e comum (revogar do anônimo e
+    conceder ao usuário logado); o verdadeiro positivo é quem revogou achando
+    que fechou.
+    """
+
+    def _scan(self, *arquivos: str) -> list[dict]:
+        import sql_lint
+        with tempfile.TemporaryDirectory() as td:
+            caminhos = []
+            for i, sql in enumerate(arquivos):
+                f = Path(td) / f"{i:04d}_m.sql"
+                f.write_text(sql, encoding="utf-8")
+                caminhos.append(f)
+            return sql_lint.escanear(caminhos, set())
+
+    def _rules(self, *arquivos: str) -> list[str]:
+        return [a["rule"] for a in self._scan(*arquivos)]
+
+    def test_revoke_sem_authenticated_acusa(self):
+        self.assertIn(REVOKE_INCOMPLETO, self._rules(
+            "revoke execute on function public.fn_x(uuid) from public, anon;\n"))
+
+    def test_revoke_completo_nao_acusa(self):
+        self.assertNotIn(REVOKE_INCOMPLETO, self._rules(
+            "revoke execute on function public.fn_x(uuid) from public, anon, authenticated;\n"))
+
+    def test_grant_deliberado_nao_acusa(self):
+        # O padrão correto de RPC de app: fecha o anônimo, declara a intenção.
+        self.assertNotIn(REVOKE_INCOMPLETO, self._rules(
+            "revoke execute on function public.fn_x(uuid) from public, anon;\n"
+            "grant  execute on function public.fn_x(uuid) to authenticated;\n"))
+
+    def test_grant_em_outro_arquivo_nao_acusa(self):
+        # Revoke e grant em migrações diferentes é o caso normal.
+        self.assertNotIn(REVOKE_INCOMPLETO, self._rules(
+            "revoke execute on function fn_x(uuid) from public, anon;\n",
+            "grant execute on function public.fn_x(uuid) to authenticated;\n"))
+
+    def test_revoke_posterior_completa_nao_acusa(self):
+        # A correção real é um revoke NOVO numa migração posterior; o antigo
+        # continua no repositório. Sem unir os papéis, o repo corrigido acusaria
+        # para sempre.
+        self.assertNotIn(REVOKE_INCOMPLETO, self._rules(
+            "revoke execute on function fn_x(uuid, text) from public, anon;\n",
+            "revoke execute on function fn_x(uuid, text) from public, anon, authenticated;\n"))
+
+    def test_alvo_dinamico_nao_acusa(self):
+        # Revogar em laço dentro de bloco DO é idiomático; a identidade da
+        # função não é conhecível por regex.
+        self.assertNotIn(REVOKE_INCOMPLETO, self._rules(
+            "do $$ declare r record; begin\n"
+            "  for r in select oid::regprocedure as sig from pg_proc loop\n"
+            "    execute format('revoke execute on function %s from public, anon', r.sig);\n"
+            "  end loop;\nend $$;\n"))
+
+    def test_assinatura_multilinha_acusa(self):
+        achados = self._scan(
+            "revoke execute on function fn_ingest(uuid, text, numeric,\n"
+            "  timestamptz, text) from public, anon;\n")
+        alvo = [a for a in achados if a["rule"] == REVOKE_INCOMPLETO]
+        self.assertEqual(len(alvo), 1)
+        self.assertEqual(alvo[0]["severity"], "HIGH")
+
+    def test_revoke_de_tabela_ignorado(self):
+        # `revoke ... on <tabela>` não é `on function` — fora do escopo.
+        self.assertNotIn(REVOKE_INCOMPLETO, self._rules(
+            "revoke insert, update, delete on compras from anon, authenticated;\n"))
+
+    def test_uma_funcao_um_achado(self):
+        # Dois revokes incompletos da mesma função não viram dois achados.
+        achados = self._scan(
+            "revoke execute on function fn_x(uuid) from public;\n",
+            "revoke execute on function fn_x(uuid) from anon;\n")
+        self.assertEqual(len([a for a in achados if a["rule"] == REVOKE_INCOMPLETO]), 1)
+
+
+class SupabasePatTests(unittest.TestCase):
+    def test_pat_detectado(self):
+        import secrets_scan
+        # Montado em tempo de execução: um literal `sbp_...` no repositório
+        # dispararia o push protection do GitHub e o próprio scanner.
+        falso = "sbp_" + "a1b2c3d4" * 5
+        regras = [r for r in secrets_scan.REGRAS if r.re.search(falso)]
+        self.assertEqual([r.id for r in regras], ["supabase-pat"])
+        self.assertEqual(regras[0].sev, "CRITICAL")
+
+    def test_pat_curto_ignorado(self):
+        import secrets_scan
+        self.assertFalse(any(r.re.search("sbp_curto") for r in secrets_scan.REGRAS))
+
+
 if __name__ == "__main__":
     unittest.main()

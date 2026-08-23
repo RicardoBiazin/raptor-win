@@ -41,6 +41,26 @@ grant execute on function public.fn_setup() to public;
 -- Grant só a authenticated (ok).
 grant execute on function public.fn_do_usuario() to authenticated;
 
+-- ── REVOKE que esquece `authenticated` ────────────────────────────────────
+-- O Supabase roda `alter default privileges ... grant execute on functions to
+-- anon, authenticated`, então cada função nasce com um grant PRÓPRIO para
+-- `authenticated`. Revogar de `public` não desfaz esse grant — a função segue
+-- chamável por qualquer usuário logado.
+revoke execute on function public.fn_interna(uuid) from public, anon;
+
+-- Assinatura em várias linhas: o caso que mais escapa, porque é o das funções
+-- com muitos argumentos.
+revoke execute on function public.fn_ingestao(uuid, text, numeric,
+  timestamptz, text) from public, anon;
+
+-- Revoke completo (ok): fecha os três papéis de cliente.
+revoke execute on function public.fn_interna_ok(uuid) from public, anon, authenticated;
+
+-- Revoke parcial + GRANT deliberado (ok): é o padrão correto de RPC que a tela
+-- chama — fecha o anônimo e declara a intenção para o usuário logado.
+revoke execute on function public.fn_do_app(uuid) from public, anon;
+grant execute on function public.fn_do_app(uuid) to authenticated;
+
 -- ── RLS init plan (performance): auth.uid() reavaliado por linha ───────────
 create policy p_meu on public.tabela_tres
   for select to authenticated using (user_id = auth.uid());

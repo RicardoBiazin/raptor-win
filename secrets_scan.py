@@ -83,6 +83,13 @@ REGRAS = [
     Regra("supabase-secret", "CRITICAL",
           "Chave SECRETA do Supabase (service_role)",
           r"\bsb_secret_[A-Za-z0-9_\-]{15,}"),
+    # Escopo de CONTA, não de projeto: cria e apaga projetos e lê segredos em
+    # toda a organização. Sem esta linha ele escapa duas vezes — não há prefixo
+    # que o pegue, e o heurístico de entropia do `.env` exige uma maiúscula,
+    # que um token de hex minúsculo não tem.
+    Regra("supabase-pat", "CRITICAL",
+          "Token pessoal do Supabase (acesso à CONTA inteira, não a um projeto)",
+          r"\bsbp_[A-Za-z0-9]{36,}"),
     Regra("openai-key", "CRITICAL", "Chave da OpenAI", r"\bsk-[A-Za-z0-9]{32,}"),
     Regra("groq-key", "CRITICAL", "Chave da Groq", r"\bgsk_[A-Za-z0-9]{40,}"),
     Regra("nvidia-key", "CRITICAL", "Chave da NVIDIA", r"\bnvapi-[A-Za-z0-9_\-]{40,}"),
