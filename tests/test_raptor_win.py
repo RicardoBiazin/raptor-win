@@ -268,5 +268,50 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("cryptography", saida)
 
 
+class SqlLintTests(unittest.TestCase):
+    def _scan(self, sql: str) -> list[dict]:
+        import sql_lint
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "m.sql"
+            f.write_text(sql, encoding="utf-8")
+            return sql_lint.escanear([f], set())
+
+    def test_duplicate_index_flagged_once(self):
+        rules = [a["rule"] for a in self._scan(
+            "create index a on public.t (email, criado_em desc);\n"
+            "create index b on public.t (email, criado_em desc);\n"
+            "create index c on public.t (telefone);\n"
+        )]
+        self.assertEqual(rules.count("sql.duplicate-index"), 1)
+
+    def test_different_columns_not_duplicate(self):
+        rules = [a["rule"] for a in self._scan(
+            "create index a on public.t (email);\n"
+            "create index b on public.t (telefone);\n"
+        )]
+        self.assertNotIn("sql.duplicate-index", rules)
+
+    def test_multiple_permissive_flagged(self):
+        rules = [a["rule"] for a in self._scan(
+            "create policy p1 on public.t for select to authenticated using (true);\n"
+            "create policy p2 on public.t for select to authenticated using (x = 1);\n"
+        )]
+        self.assertIn("sql.multiple-permissive-policies", rules)
+
+    def test_restrictive_is_not_multiple_permissive(self):
+        rules = [a["rule"] for a in self._scan(
+            "create policy p1 on public.t for select to authenticated using (true);\n"
+            "create policy p2 on public.t as restrictive for select to authenticated using (ativo);\n"
+        )]
+        self.assertNotIn("sql.multiple-permissive-policies", rules)
+
+    def test_different_action_not_overlap(self):
+        rules = [a["rule"] for a in self._scan(
+            "create policy p1 on public.t for select to authenticated using (true);\n"
+            "create policy p2 on public.t for insert to authenticated with check (true);\n"
+        )]
+        self.assertNotIn("sql.multiple-permissive-policies", rules)
+
+
 if __name__ == "__main__":
     unittest.main()

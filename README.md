@@ -203,4 +203,9 @@ Static analysis reports *possibilities*; you still validate exploitability.
     it callable unauthenticated via the REST RPC API; risky when the function is `SECURITY DEFINER`.
   - `supabase/rls-init-auth-uid` — performance: RLS policy calls `auth.uid()`/`auth.role()`/`auth.jwt()`
     directly (re-evaluated per row); wrap as `(select auth.uid())` so the planner caches it.
+- `sql_lint.py` — cross-statement SQL checks that Semgrep (one match per snippet) can't correlate,
+  run automatically over `*.sql` and merged into the same report:
+  - `sql.duplicate-index` — two `create index` on the same table with identical columns/uniqueness.
+  - `sql.multiple-permissive-policies` — more than one PERMISSIVE policy for the same table+action+role
+    (Postgres ORs them per row); consolidate into one. `RESTRICTIVE` policies are excluded.
 - Semgrep and its Registry packs are © r2c/Semgrep, used per their terms.

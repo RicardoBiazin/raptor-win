@@ -46,5 +46,18 @@ create policy p_meu on public.tabela_tres
   for select to authenticated using (user_id = auth.uid());
 
 -- Forma cacheável (ok): auth.uid() dentro de um subselect.
-create policy p_ok on public.tabela_tres
+create policy p_ok on public.tabela_tres_ok
   for select to authenticated using (user_id = (select auth.uid()));
+
+-- ── Índice duplicado (mesma tabela + mesmas colunas) ──────────────────────
+create index idx_a on public.tabela_quatro (email, criado_em desc);
+create index idx_b on public.tabela_quatro (email, criado_em desc);
+-- Índice diferente (ok).
+create index idx_c on public.tabela_quatro (telefone);
+
+-- ── Múltiplas policies PERMISSIVAS (mesma tabela/ação/papel) ───────────────
+create policy m1 on public.tabela_cinco for select to authenticated using (true);
+create policy m2 on public.tabela_cinco for select to authenticated using (dono = (select auth.uid()));
+-- Uma permissiva + uma RESTRICTIVE (ok): não é "multiple permissive".
+create policy r1 on public.tabela_seis for select to authenticated using (true);
+create policy r2 on public.tabela_seis as restrictive for select to authenticated using (ativo);

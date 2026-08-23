@@ -32,6 +32,7 @@ from collections import Counter, defaultdict
 
 import baseline as baseline_mod
 import secrets_scan
+import sql_lint
 import typosquat
 
 # O CONSOLE DO WINDOWS NÃO É UTF-8 POR PADRÃO. Ele abre em cp1252, que não
@@ -876,6 +877,18 @@ def main() -> int:
             sys.stderr.write(
                 "\nUm relatório vazio aqui significaria 'não analisei', não 'está limpo'.\n")
             return 2
+
+    # Checagens SQL que olham vários comandos (índice duplicado, policies
+    # permissivas múltiplas). Locais e baratas — rodam sempre e entram na mesma
+    # lista. O Semgrep, uma regra por trecho, não faz essa correlação.
+    sqlf = sql_lint.escanear(targets, SKIP_DIRS)
+    if sqlf:
+        # Mesma classificação de contexto dos achados do Semgrep (fixture/teste/
+        # tooling), para que a contagem "exigem atenção" trate SQL igual ao resto.
+        for f in sqlf:
+            f["context"] = classify_context(f["path"], f["rule"])
+        findings = sorted(findings + sqlf,
+                          key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
 
     # Os achados de credencial entram na MESMA lista dos de código, de
     # propósito: assim atravessam console, Markdown, SARIF e --fail-on sem
