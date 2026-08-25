@@ -113,7 +113,8 @@ Windows launcher (puts `semgrep` on PATH automatically):
   python raptor_win.py . --db-audit
 
   # psql backend (server-enforced read-only; recommended for CI)
-  export RAPTOR_DB_URL='postgresql://raptor_ro:PASS@host:5432/postgres'
+  export PGPASSWORD=...                 # a senha fica FORA da URL
+  export RAPTOR_DB_URL='postgresql://raptor_ro@host:5432/postgres'
   python raptor_win.py . --db-audit --db-backend psql
   ```
 

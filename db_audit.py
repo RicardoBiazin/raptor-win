@@ -762,7 +762,8 @@ AJUDA_ENV = (
     "defina as variáveis de ambiente (NUNCA na linha de comando, que fica no "
     "histórico do shell e é visível a outros processos):\n"
     "  API  : SUPABASE_ACCESS_TOKEN + SUPABASE_PROJECT_REF\n"
-    "  psql : RAPTOR_DB_URL (ex.: postgresql://raptor_ro:SENHA@host:5432/postgres)"
+    "  psql : RAPTOR_DB_URL (ex.: postgresql://raptor_ro@host:5432/postgres)\n"
+    "         a senha vai em PGPASSWORD, fora da URL"
 )
 
 
