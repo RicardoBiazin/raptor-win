@@ -72,6 +72,37 @@ jobs:
             exit 1
           fi
           echo "as 12 regras .sql dispararam"
+      - name: Auditoria de banco sem credencial NAO pode reportar limpo
+        run: |
+          # Uma execucao so-de-banco batia em dois guardas de main() que nao a
+          # conheciam: um saia 2 com "nenhuma configuracao de regra
+          # selecionada", e o outro fazia --fail-on retornar 0 EM SILENCIO. O
+          # segundo e o modo de falha "reportei limpo sem ter analisado".
+          #
+          # Sem banco na CI, o que se trava aqui e o comportamento de FALHA:
+          # sair 2, nomear as tres variaveis de ambiente, e nao imprimir
+          # "Nenhum achado".
+          opts="--db-audit --no-raptor --no-registry --fail-on HIGH"
+          if python raptor_win.py sample_vuln $opts > db.txt 2>&1; then
+            echo "ERRO: auditoria sem credencial retornou sucesso"; cat db.txt; exit 1
+          fi
+          cat db.txt
+          grep -q 'SUPABASE_ACCESS_TOKEN' db.txt
+          grep -q 'RAPTOR_DB_URL' db.txt
+          grep -q 'NAO realizada\|NÃO realizada' db.txt
+          if grep -q 'Nenhum achado' db.txt; then
+            echo "ERRO: disse 'Nenhum achado' sem ter analisado"; exit 1
+          fi
+      - name: Sem --db-audit nada muda
+        run: |
+          # Guarda de regressao dos dois guardas de main() alterados acima: a
+          # execucao normal, sem a flag, tem de continuar passando como antes.
+          #
+          # `--no-registry` sozinho (as regras locais seguem carregando):
+          # `--no-raptor --no-registry` juntos nao deixam regra nenhuma e a
+          # ferramenta recusa por desenho, o que testaria outra coisa.
+          python raptor_win.py sample_vuln --no-registry > semdb.txt 2>&1
+          grep -Eq 'exigem aten\S+o: 0' semdb.txt
       - name: As regras do registro precisam ter carregado
         run: |
           # O passo anterior passa mesmo se NENHUM pacote do registro

@@ -31,6 +31,7 @@ import urllib.request
 from collections import Counter, defaultdict
 
 import baseline as baseline_mod
+import db_audit
 import secrets_scan
 import sql_lint
 import typosquat
@@ -783,6 +784,48 @@ def render_sca(sca: dict) -> None:
             print(f"     corrigido em: {fixed or '—'}   ·   https://osv.dev/vulnerability/{vid}")
 
 
+def run_db_audit(args) -> dict:
+    """Auditoria SOMENTE-LEITURA do catálogo, se `--db-audit` foi pedido.
+
+    Mesma forma de retorno de `run_sca()` de propósito: assim o padrão de teste
+    `mock.patch.object(raptor_win, "run_db_audit", ...)` vale igual.
+
+    Credencial vem só do ambiente. Nenhum host, usuário, senha ou token entra no
+    retorno — o que sai daqui pode ir para relatório commitado.
+    """
+    try:
+        consultar, backend = db_audit.abrir_backend(
+            os.environ, args.db_backend, args.db_timeout, args.db_project_ref or "")
+        cap = db_audit.preflight(consultar)
+        achados = db_audit.escanear(
+            consultar,
+            schemas_incluidos=frozenset(args.db_schema) if args.db_schema else None,
+            capacidades=cap)
+        return {"findings": achados, "backend": backend, "capacidades": cap}
+    except db_audit.ErroBanco as e:
+        return {"findings": [], "backend": args.db_backend, "error": str(e)}
+
+
+def render_db(res: dict) -> None:
+    print("\n" + "=" * 62)
+    print(" raptor-win — catálogo Postgres/Supabase (SOMENTE LEITURA)")
+    print("=" * 62)
+    if res.get("error"):
+        print(f" ✗ auditoria NÃO realizada: {res['error']}")
+        return
+    cap = res.get("capacidades", {})
+    # Nada de host, usuário, senha ou token: só o que é público ou booleano.
+    garantia = ("imposta pelo servidor (default_transaction_read_only=on)"
+                if cap.get("somente_leitura") else "do lado cliente (SQL constante + guarda)")
+    print(f" backend: {res.get('backend', '?')}  ·  Postgres {cap.get('versao', '?')}")
+    print(f" somente-leitura: {garantia}")
+    print(f" papéis de cliente presentes: "
+          f"anon={'sim' if cap.get('tem_anon') else 'não'}  "
+          f"authenticated={'sim' if cap.get('tem_auth') else 'não'}")
+    n = len(res.get("findings", []))
+    print(f" achados de catálogo: {n}" if n else " Nenhum achado de catálogo. ✅")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="raptor-win",
@@ -795,6 +838,17 @@ def main() -> int:
     ap.add_argument("--changed", metavar="REF", help="escanear só arquivos alterados desde <ref> git (ex.: origin/main)")
     ap.add_argument("--sca", action="store_true", help="também checar dependências vulneráveis (requirements.txt / package-lock.json) via OSV.dev")
     ap.add_argument("--secrets", action="store_true", help="também procurar credenciais no repositório e arquivos de segredo fora do .gitignore")
+    ap.add_argument("--db-audit", action="store_true",
+                    help="auditar o catálogo Postgres/Supabase ao vivo (SOMENTE LEITURA; "
+                         "credencial só por variável de ambiente)")
+    ap.add_argument("--db-backend", choices=["auto", "api", "psql"], default="auto",
+                    help="como falar com o banco (padrão: auto)")
+    ap.add_argument("--db-project-ref", metavar="REF",
+                    help="ref do projeto Supabase (NÃO é segredo; sobrepõe SUPABASE_PROJECT_REF)")
+    ap.add_argument("--db-schema", action="append", default=[], metavar="NOME",
+                    help="restringe a auditoria a estes schemas (repetível)")
+    ap.add_argument("--db-timeout", type=int, default=30, metavar="SEG",
+                    help="tempo limite por consulta ao banco (padrão: 30)")
     ap.add_argument("--no-raptor", action="store_true", help="não usar as regras do RAPTOR")
     ap.add_argument("--no-registry", action="store_true", help="não usar os packs do Semgrep Registry")
     ap.add_argument("--raptor-rules", metavar="DIR", help="caminho alternativo para as regras do RAPTOR")
@@ -829,7 +883,7 @@ def main() -> int:
     raptor_rules = Path(args.raptor_rules).resolve() if args.raptor_rules else RAPTOR_RULES
     exts = detect_languages(targets)
     configs = build_configs(exts, not args.no_raptor, not args.no_registry, raptor_rules)
-    if not configs and not args.sca and not args.secrets:
+    if not configs and not args.sca and not args.secrets and not args.db_audit:
         sys.stderr.write("nenhuma configuração de regra selecionada (e --sca não foi pedido).\n")
         return 2
 
@@ -908,6 +962,25 @@ def main() -> int:
             findings = sorted(findings + sca.get("findings", []),
                               key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
 
+    dbres = None
+    if args.db_audit:
+        dbres = run_db_audit(args)
+        render_db(dbres)
+        # Auditoria PEDIDA que não completou sai 2, e não avisa-e-continua como
+        # a SCA: uma falha de SCA deixa o resultado do SAST válido, mas uma
+        # execução só-de-banco que imprime "Nenhum achado ✅" depois de não
+        # conseguir conectar é uma mentira debaixo de um gate de CI.
+        if dbres.get("error"):
+            sys.stderr.write(
+                "auditoria de banco NÃO realizada — o relatório não é confiável.\n")
+            return 2
+        # SEM classify_context() aqui, ao contrário do bloco do sql_lint: os
+        # achados de catálogo já trazem `context`, e medido que `db:test.foo()` e
+        # `db:seed.aplicar()` casam TOOLING_RE — um schema ou função chamado
+        # `test`/`seed` sairia da conta de "exigem atenção" em silêncio.
+        findings = sorted(findings + dbres.get("findings", []),
+                          key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
+
     # RISCOS ACEITOS. Aplicado no fim, sobre a lista já completa: o
     # baseline muda o que REPROVA, não o que é mostrado. Achado dispensado
     # continua no relatório, marcado — sumir com ele seria a mesma cegueira
@@ -946,7 +1019,7 @@ def main() -> int:
 
     # Todos os formatos são gerados somente depois de reunir SAST, credenciais
     # e SCA e de aplicar o baseline. Assim preservam a mesma visão dos achados.
-    if findings or configs:
+    if findings or configs or args.db_audit:
         render_console(findings, files_scanned, rules_run)
     if args.md:
         Path(args.md).write_text(
@@ -961,7 +1034,7 @@ def main() -> int:
         print()
         print(baseline_mod.prox_de_aceitar(findings))
 
-    if args.fail_on and (configs or args.secrets or args.sca):
+    if args.fail_on and (configs or args.secrets or args.sca or args.db_audit):
         floor = SEV_RANK[args.fail_on]
         real = [f for f in exigem_atencao(findings)
                 if not f.get("aceito")

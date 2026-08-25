@@ -26,6 +26,7 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | **Dependency scanning (SCA) via OSV.dev** (`--sca`) | Generate exploits or patches |
 | **Typosquat detection** on dependency names (`--sca`) | — |
 | **Secret scanning (`--secrets`)**, incl. secret files not in `.gitignore` | — |
+| **Live Postgres/Supabase catalog audit (`--db-audit`), read-only** | Write to your database (four layers stop it) |
 | De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
 | Console + Markdown + **SARIF** + raw JSON report | — |
 | Diff mode (`--changed`) + CI exit codes (`--fail-on`) | — |
@@ -95,6 +96,102 @@ Windows launcher (puts `semgrep` on PATH automatically):
   reports known CVEs per package, with the fixed version and a link. SCA findings join SAST and
   secrets in Markdown, SARIF, accepted-risk baselines and `--fail-on`. Runs standalone too
   (`--sca --no-registry --no-raptor` = SCA only, no Semgrep needed).
+- `--db-audit` — audit a **live** Postgres/Supabase catalog, **read-only**. Additive to the static
+  scan; credentials come **only** from environment variables (never argv — that is visible to other
+  processes via `ps`/Task Manager details and lands in shell history).
+
+  **Why this exists.** A repo of migrations is not the database. Measured on a real project: the
+  migrations were coherent and the live catalog still had **21 functions executable by `anon`**,
+  **18 with a hijackable `search_path`**, and an extension the docs tell you to relocate that
+  **cannot be relocated**. None of that is derivable from the `.sql` files — what decides is
+  `pg_proc.proacl`, `pg_proc.proconfig` and `pg_extension.extrelocatable`.
+
+  ```bash
+  # API backend (no database password, no driver to install)
+  export SUPABASE_ACCESS_TOKEN=...        # personal access token
+  export SUPABASE_PROJECT_REF=abcdefgh…   # not a secret; it is in the public URL
+  python raptor_win.py . --db-audit
+
+  # psql backend (server-enforced read-only; recommended for CI)
+  export RAPTOR_DB_URL='postgresql://raptor_ro:PASS@host:5432/postgres'
+  python raptor_win.py . --db-audit --db-backend psql
+  ```
+
+  Also: `--db-backend {auto,api,psql}`, `--db-project-ref REF`, `--db-schema NAME` (repeatable),
+  `--db-timeout SEC`.
+
+  **Read-only, in four layers.** (1) Every query is a module constant in `db_audit.CONSULTAS` — no
+  SQL is built from user input, only the schema list, validated identifier by identifier.
+  (2) `_exigir_somente_leitura` runs on every query in every backend: `select`/`with` only, no
+  mid-statement `;`, and a verb denylist applied to the SQL **with string literals blanked** (so
+  `has_table_privilege(…, 'insert, update, delete')` is read as data, not a command). A unit test
+  asserts every constant passes and that an `update` is refused, so a careless edit breaks the build
+  rather than someone's production. (3) The `psql` backend sets `default_transaction_read_only=on`
+  in the child environment, which makes the guarantee the **server's**, not our regex's — and the
+  preflight reads `transaction_read_only` back so the guarantee is *shown*. (4) With the API backend
+  the guarantee is client-side (layers 1–2) plus the fact that the SQL is compiled in; the
+  Management API token is **account**-scoped, so for CI prefer `psql` with a least-privilege role:
+
+  ```sql
+  create role raptor_ro login password '…';   -- no GRANTs at all
+  alter role raptor_ro set default_transaction_read_only = on;
+  ```
+
+  Every catalog object these checks read (`pg_proc`, `pg_class`, `pg_policy`, `pg_policies`,
+  `pg_extension`, `pg_roles`) is world-readable, and `has_*_privilege()` works for any caller — so a
+  role with **zero** grants is enough. Note `pg_roles`, not `pg_authid`: the latter holds password
+  hashes and is superuser-only.
+
+  **Credentials never leave the process.** Findings carry only `schema.object`. `_sanitizar` scrubs
+  secrets from every backend exception, because `psql` writes host and user to stderr and `urllib`
+  puts the URL into `HTTPError`. Nothing from the preflight (`current_user`, `current_database()`) is
+  collected — it was removed from the query, not collected-and-filtered. Catalog rows are never
+  serialised to disk; `--json-out` stays Semgrep's raw JSON.
+
+  **A failed audit exits 2**, it does not warn-and-continue like `--sca`. An SCA outage leaves the
+  SAST results valid; a database-only run that prints "Nenhum achado ✅" after failing to connect is
+  a lie under a CI gate.
+
+  **Checks** (severity is raised in schemas PostgREST publishes — `public`, `graphql_public`):
+
+  - `db.function-executable-by-anon` / `-by-public` — reachable as `POST /rest/v1/rpc/<name>`
+    without a login. `proacl IS NULL` does **not** mean "no grants": it means *default* privileges,
+    and the default for a function **is** `EXECUTE TO PUBLIC` — hence
+    `aclexplode(coalesce(proacl, acldefault('f', proowner)))` in the query.
+  - `db.function-search-path-missing` — authoritative counterpart of the static
+    `raptor.supabase.function-search-path-mutable`.
+  - `db.function-search-path-hijackable` — `search_path` set but `pg_temp` missing or not last.
+    **The Supabase linter does not report this**: it only checks that a `search_path` exists.
+  - `db.security-definer-owned-by-superuser` — DEFINER owned by a superuser/BYPASSRLS role **and**
+    reachable by a client role. Both halves are required: on hosted Supabase `postgres` owns almost
+    every function and has `rolbypassrls = true`, so without the reachability gate this fired on 85
+    of 90 findings against a real database — a property of the platform, not of the audited code.
+  - `db.table-without-rls-exposed` — CRITICAL when `anon` can write.
+  - `db.rls-enabled-no-policy` — **not a leak, a silent outage**: every query returns zero rows for
+    non-owner roles. The message says so explicitly, so nobody "fixes" it by disabling RLS.
+  - `db.policy-always-true-write`, `db.multiple-permissive-policies`.
+  - `db.extension-in-public` — reports `extrelocatable` **and branches on it**. A non-relocatable
+    extension cannot be moved: `alter extension … set schema` fails with `0A000 … does not support
+    SET SCHEMA`, so for those the finding says the migration *will fail* and that accepting it is a
+    legitimate outcome. Recommending the impossible migration is worse than staying quiet.
+  - `db.extension-network-exec-por-anon` — `anon` holds EXECUTE on the functions of a
+    network-capable extension (`pg_net`, `http`, `dblink`, …), **measured in the catalog**. HIGH only
+    when those functions live in a published schema, because holding EXECUTE is not the same as
+    being callable through the API.
+
+  **Noise is the whole game here.** Objects owned by an extension (`pg_depend.deptype = 'e'`), by a
+  platform role (`supabase_admin` and friends), trigger functions, `pg_*` schemas, and `search_path`
+  on non-DEFINER functions with no anonymous reach are all excluded. Those filters are not
+  optimisations — without them the report drowns and trains you to ignore reports.
+
+  **`--db-audit` with `--sarif` is not a documented combination yet.** The SARIF is valid and the
+  `db:` pseudo-path survives `os.path.relpath`, but GitHub Code Scanning may refuse a result whose
+  `artifactLocation.uri` is not a file in the repo, and that has not been verified against a real
+  upload. Until it is, console and Markdown are the supported surfaces for catalog findings.
+
+  `requirements.txt` is **unchanged**: the API backend is pure-stdlib `urllib`, and the fallback
+  shells out to `psql` the same way the tool already shells out to `git` and `semgrep`. The query
+  layer is a callable, so a `psycopg` backend would be ~20 lines and touch no check.
 - `--no-raptor` / `--no-registry` — drop one of the rule sources.
 - `--raptor-rules DIR` — point at a different RAPTOR rules folder (e.g. your own RAPTOR checkout).
 - `--exclude PATTERN` — extra exclusion (repeatable). `node_modules`, `.git`, `dist`, `venv`,
@@ -250,4 +347,6 @@ Static analysis reports *possibilities*; you still validate exploitability.
     at `INFO` with a **different** message: policies are evaluated with the *querying* role's
     privileges, so revoking from `authenticated` breaks every query on the table with "permission
     denied for function" — the message is the mitigation, not the heuristic.
+- `db_audit.py` — read-only live-catalog checks (`db.*`), authored for `raptor-win`. Reads only
+  world-readable catalog relations; never writes. See `--db-audit` above.
 - Semgrep and its Registry packs are © r2c/Semgrep, used per their terms.
