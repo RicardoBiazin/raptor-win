@@ -117,13 +117,25 @@ rules:
 
   - id: raptor.go.insecure-tls-min-version
     message: >-
-      TLS MinVersion set to 0 allows negotiation of deprecated protocol
-      versions (SSLv3, TLS 1.0, TLS 1.1). Set MinVersion to
-      tls.VersionTLS12 or tls.VersionTLS13.
+      TLS MinVersion allows negotiation of deprecated protocol versions
+      (SSLv3, TLS 1.0, TLS 1.1). Set MinVersion to tls.VersionTLS12 or
+      tls.VersionTLS13.
     languages: [go]
     severity: HIGH
-    pattern: |
-      tls.Config{..., MinVersion: 0, ...}
+    # Real-world bad configs name the deprecated version constants;
+    # an explicit literal 0 is kept for completeness. Known residual
+    # (undetectable in a struct-literal pattern): OMITTING MinVersion
+    # yields the zero value with the same effect — absence of a field
+    # cannot be matched here (U12-F107).
+    pattern-either:
+      - pattern: |
+          tls.Config{..., MinVersion: tls.VersionSSL30, ...}
+      - pattern: |
+          tls.Config{..., MinVersion: tls.VersionTLS10, ...}
+      - pattern: |
+          tls.Config{..., MinVersion: tls.VersionTLS11, ...}
+      - pattern: |
+          tls.Config{..., MinVersion: 0, ...}
     metadata:
       cwe: ["CWE-295"]
       tags: ["security", "go", "tls"]
