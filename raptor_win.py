@@ -32,6 +32,7 @@ from collections import Counter, defaultdict
 
 import baseline as baseline_mod
 import db_audit
+import headers_lint
 import secrets_scan
 import sql_lint
 import typosquat
@@ -80,6 +81,11 @@ SKIP_DIRS = {
     # build output
     "dist", "build", "out", ".out", "target", ".next", ".nuxt", ".svelte-kit",
     ".angular", ".serverless", ".terraform",
+    # Cache das CLIs de deploy. `.netlify/` guarda uma COPIA do netlify.toml e
+    # as functions empacotadas; esta' no .gitignore de todo projeto. Ler dali
+    # produz achado sobre arquivo gerado -- e pior, manda o usuario editar um
+    # arquivo que o proximo deploy sobrescreve.
+    ".netlify", ".vercel",
     # caches / vcs / tooling
     ".git", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
     ".gradle", ".cache", "htmlcov",
@@ -1319,7 +1325,11 @@ def main() -> int:
     # Checagens SQL que olham vários comandos (índice duplicado, policies
     # permissivas múltiplas). Locais e baratas — rodam sempre e entram na mesma
     # lista. O Semgrep, uma regra por trecho, não faz essa correlação.
-    sqlf = sql_lint.escanear(targets, SKIP_DIRS)
+    # Cabeçalhos de segurança do host estático (netlify.toml / _headers /
+    # vercel.json). Mesma natureza do sql_lint: leitura local, sem rede, sem
+    # flag. E mesma razão de existir -- o Semgrep olha código, e esta
+    # configuração não é código, então ninguém olhava.
+    sqlf = headers_lint.escanear(targets, SKIP_DIRS) + sql_lint.escanear(targets, SKIP_DIRS)
     if sqlf:
         # Mesma classificação de contexto dos achados do Semgrep (fixture/teste/
         # tooling), para que a contagem "exigem atenção" trate SQL igual ao resto.

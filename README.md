@@ -29,6 +29,7 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | **GitHub Actions** in `.github/workflows` scanned as dependencies (`--sca`) | — |
 | **Secret scanning (`--secrets`)**, incl. secret files not in `.gitignore` | — |
 | **Live Postgres/Supabase catalog audit (`--db-audit`), read-only** | Write to your database (four layers stop it) |
+| **Security headers** of the static host (`netlify.toml`, `_headers`, `vercel.json`) | Fetch your live site to check them |
 | De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
 | Console + Markdown + **SARIF** + raw JSON report | — |
 | Diff mode (`--changed`) + CI exit codes (`--fail-on`) | — |
@@ -116,6 +117,21 @@ Windows launcher (puts `semgrep` on PATH automatically):
   "all clear". `raptor-win` therefore queries by **name**, then compares the ref locally. A ref it
   cannot order (a SHA pin, a branch) or a floating major tag whose fix lands inside the same major
   is reported as **needs review**, never as clean.
+- **Security headers** — always on, no flag, like the SQL lint. `helmet` solves this in one
+  line for Express, but a Vite/React app on Netlify or Vercel *has no Express*: there is no
+  middleware to hang a header on. The headers live in `netlify.toml`, `_headers` or
+  `vercel.json` — configuration nobody reviews, because it is not code and a wrong or missing
+  value never breaks the build. raptor-win reads all three, unions what they declare for the
+  catch-all route, and compares against what helmet applies by default.
+
+  Two classes of finding: the header is **absent**, or it is **present and does not protect** —
+  the second matters more, because `Content-Security-Policy: default-src *` passes any review
+  that only checks presence. And a third that is quieter than both: an `_headers` file outside
+  the publish directory. It is committed, reviewed, correct — and Vite never copies it to
+  `dist/`, so the site ships bare with no error anywhere. Build output (`dist/`, `dist-demo/`)
+  is excluded from the read entirely, so a stale artifact can neither mask a gap in the source
+  nor attract the fix.
+
 - `--db-audit` — audit a **live** Postgres/Supabase catalog, **read-only**. Additive to the static
   scan; credentials come **only** from environment variables (never argv — that is visible to other
   processes via `ps`/Task Manager details and lands in shell history).

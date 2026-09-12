@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import db_audit
+import headers_lint
 import raptor_win
 import raptor_win as R
 import typosquat
@@ -1465,3 +1466,220 @@ class TestManifestosNovos(unittest.TestCase):
         saida = buf.getvalue()
         self.assertIn("C:/proj/yarn.lock", saida)
         self.assertIn("nenhuma dependência extraída", saida)
+
+
+# ---------------------------------------------------------------------------
+# Cabecalhos de seguranca do host estatico (headers_lint)
+# ---------------------------------------------------------------------------
+
+class _BaseHeaders(unittest.TestCase):
+    def _projeto(self, arquivos: dict) -> Path:
+        """Cria um projeto de mentira. `index.html` sempre, senao a checagem de
+        ausencia nao liga (e esta' certa em nao ligar: biblioteca nao publica
+        pagina)."""
+        d = Path(tempfile.mkdtemp())
+        (d / "index.html").write_text("<html></html>", encoding="utf-8")
+        (d / "vite.config.ts").write_text("export default {}", encoding="utf-8")
+        for rel, conteudo in arquivos.items():
+            alvo = d / rel
+            alvo.parent.mkdir(parents=True, exist_ok=True)
+            alvo.write_text(conteudo, encoding="utf-8")
+        return d
+
+    def _rodar(self, d: Path) -> list[dict]:
+        return headers_lint.escanear([d], raptor_win.SKIP_DIRS)
+
+    def _regras(self, d: Path) -> set:
+        return {a["rule"] for a in self._rodar(d)}
+
+
+COMPLETO = """/*
+  Content-Security-Policy: default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(), camera=()
+  Cross-Origin-Opener-Policy: same-origin
+"""
+
+
+class TestHeadersAusencia(_BaseHeaders):
+    def test_projeto_completo_fica_silencioso(self):
+        """Calibrado com o FiscalPro, que ja' manda tudo. Se esta configuracao
+        gera achado, a checagem esta' cobrando o que nao deve."""
+        self.assertEqual(self._regras(self._projeto({"public/_headers": COMPLETO})), set())
+
+    def test_sem_configuracao_nenhuma_acusa_todos(self):
+        regras = self._regras(self._projeto({}))
+        for h in ("content-security-policy", "strict-transport-security",
+                  "x-content-type-options", "referrer-policy", "x-frame-options"):
+            self.assertIn("headers.ausente." + h, regras, h)
+
+    def test_biblioteca_sem_index_html_nao_e_cobrada(self):
+        """Sem `index.html` nao ha' pagina para proteger. Cobrar cabecalho de
+        script e de biblioteca encheria o relatorio de ruido."""
+        d = Path(tempfile.mkdtemp())
+        (d / "package.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(self._rodar(d), [])
+
+    def test_monorepo_com_index_html_em_subpasta_e_cobrado(self):
+        """Regressao medida no omnichannel: `netlify.toml` na raiz e o app em
+        `web/`. Procurar `index.html` so' na raiz dava "nao e' site estatico" e
+        engolia em silencio um projeto publicado com tres cabecalhos."""
+        d = Path(tempfile.mkdtemp())
+        (d / "netlify.toml").write_text(
+            '[[headers]]\n  for = "/*"\n  [headers.values]\n'
+            '    X-Frame-Options = "SAMEORIGIN"\n', encoding="utf-8")
+        (d / "web").mkdir()
+        (d / "web" / "index.html").write_text("<html></html>", encoding="utf-8")
+        (d / "web" / "vite.config.ts").write_text("export default {}", encoding="utf-8")
+        self.assertIn("headers.ausente.content-security-policy", self._regras(d))
+
+    def test_frame_ancestors_na_csp_dispensa_x_frame_options(self):
+        """Sao a mesma protecao, e `frame-ancestors` e' a que navegador novo
+        respeita. Cobrar as duas seria cobrar duas vezes."""
+        d = self._projeto({"public/_headers":
+            "/*\n  Content-Security-Policy: default-src 'self'; object-src 'none'; frame-ancestors 'none'\n"})
+        self.assertNotIn("headers.ausente.x-frame-options", self._regras(d))
+
+    def test_cabecalho_so_em_rota_especifica_nao_conta_como_presente(self):
+        """CSP declarada so' em `/admin/*` nao protege a pagina inicial."""
+        d = self._projeto({"public/_headers":
+            "/admin/*\n  Content-Security-Policy: default-src 'self'\n"})
+        self.assertIn("headers.ausente.content-security-policy", self._regras(d))
+
+    def test_le_os_tres_formatos(self):
+        toml = ('[[headers]]\n  for = "/*"\n  [headers.values]\n'
+                '    Content-Security-Policy = "default-src \'self\'; object-src \'none\'; frame-ancestors \'none\'"\n')
+        vercel = json.dumps({"headers": [{"source": "/(.*)", "headers": [
+            {"key": "Content-Security-Policy",
+             "value": "default-src 'self'; object-src 'none'; frame-ancestors 'none'"}]}]})
+        for nome, conteudo in (("netlify.toml", toml), ("vercel.json", vercel),
+                               ("public/_headers", "/*\n  Content-Security-Policy: default-src 'self'; object-src 'none'; frame-ancestors 'none'\n")):
+            d = self._projeto({nome: conteudo})
+            self.assertNotIn("headers.ausente.content-security-policy",
+                             self._regras(d), nome)
+
+    def test_nome_de_cabecalho_e_insensivel_a_maiusculas(self):
+        """A norma HTTP diz isso, e a Netlify aceita. Comparar sensivel faria
+        `content-security-policy` minusculo passar por ausente."""
+        d = self._projeto({"public/_headers":
+            "/*\n  content-security-policy: default-src 'self'; object-src 'none'; frame-ancestors 'none'\n"})
+        self.assertNotIn("headers.ausente.content-security-policy", self._regras(d))
+
+
+class TestHeadersValorInseguro(_BaseHeaders):
+    """A metade que importa mais: o cabecalho existe e nao protege. Passa em
+    qualquer conferencia que so' verifique presenca."""
+
+    def _com(self, valor_csp="", extra="") -> set:
+        corpo = "/*\n"
+        if valor_csp:
+            corpo += f"  Content-Security-Policy: {valor_csp}\n"
+        corpo += extra
+        return self._regras(self._projeto({"public/_headers": corpo}))
+
+    def test_csp_curinga(self):
+        self.assertIn("headers.csp-curinga", self._com("default-src *"))
+
+    def test_unsafe_inline_so_em_script_src(self):
+        """Em `style-src` o 'unsafe-inline' e' quase inevitavel com Tailwind.
+        Acusa-lo faria o relatorio gritar em todo projeto React -- e relatorio
+        que grita sempre e' relatorio que ninguem le'."""
+        com_script = self._com("default-src 'self'; script-src 'self' 'unsafe-inline'")
+        self.assertIn("headers.csp-unsafe-inline", com_script)
+        so_style = self._com("default-src 'self'; style-src 'self' 'unsafe-inline'")
+        self.assertNotIn("headers.csp-unsafe-inline", so_style)
+
+    def test_unsafe_eval(self):
+        self.assertIn("headers.csp-unsafe-eval", self._com("default-src 'self'; script-src 'unsafe-eval'"))
+
+    def test_connect_src_curinga(self):
+        self.assertIn("headers.csp-connect-curinga",
+                      self._com("default-src 'self'; connect-src *"))
+
+    def test_hsts_zerado_e_curto(self):
+        zero = self._com(extra="  Strict-Transport-Security: max-age=0\n")
+        self.assertIn("headers.hsts-desligado", zero)
+        curto = self._com(extra="  Strict-Transport-Security: max-age=300\n")
+        self.assertIn("headers.hsts-curto", curto)
+        bom = self._com(extra="  Strict-Transport-Security: max-age=31536000; includeSubDomains\n")
+        self.assertNotIn("headers.hsts-curto", bom)
+        self.assertNotIn("headers.hsts-desligado", bom)
+
+    def test_x_frame_options_invalido(self):
+        """`ALLOWALL` nao existe na norma: o navegador ignora, e o resultado e'
+        o mesmo de nao ter o cabecalho -- mas parece configurado."""
+        self.assertIn("headers.xfo-invalido",
+                      self._com(extra="  X-Frame-Options: ALLOWALL\n"))
+        self.assertNotIn("headers.xfo-invalido",
+                         self._com(extra="  X-Frame-Options: DENY\n"))
+
+    def test_xss_auditor_legado(self):
+        """O helmet manda `0` de proposito: o auditor legado ja' foi usado para
+        CRIAR XSS em navegador antigo."""
+        self.assertIn("headers.xss-auditor-legado",
+                      self._com(extra="  X-XSS-Protection: 1; mode=block\n"))
+        self.assertNotIn("headers.xss-auditor-legado",
+                         self._com(extra="  X-XSS-Protection: 0\n"))
+
+    def test_referrer_vazante(self):
+        self.assertIn("headers.referrer-vazante",
+                      self._com(extra="  Referrer-Policy: unsafe-url\n"))
+
+    def test_csp_so_em_report_only(self):
+        """Report-Only nao bloqueia nada -- so' avisa."""
+        self.assertIn("headers.csp-so-relatorio",
+                      self._com(extra="  Content-Security-Policy-Report-Only: default-src 'self'\n"))
+
+    def test_valor_inseguro_vale_em_qualquer_rota(self):
+        """Um `unsafe-eval` declarado so' para `/admin/*` continua sendo
+        unsafe-eval em /admin."""
+        d = self._projeto({"public/_headers":
+            "/admin/*\n  Content-Security-Policy: default-src 'self'; script-src 'unsafe-eval'\n"})
+        self.assertIn("headers.csp-unsafe-eval", self._regras(d))
+
+
+class TestHeadersForaDoPublish(_BaseHeaders):
+    """O achado silencioso: o arquivo existe, esta' certo, e nunca sobe."""
+
+    def test_headers_na_raiz_e_acusado(self):
+        d = self._projeto({"_headers": COMPLETO})
+        self.assertIn("headers.arquivo-fora-do-publish", self._regras(d))
+
+    def test_headers_em_public_esta_certo(self):
+        d = self._projeto({"public/_headers": COMPLETO})
+        self.assertNotIn("headers.arquivo-fora-do-publish", self._regras(d))
+
+    def test_copia_gerada_pelo_build_nao_e_acusada(self):
+        """Medido no Sunset, que publica dois sites e por isso tem `dist/` e
+        `dist-demo/` com copias do mesmo arquivo. Acusar as geradas seria
+        acusar o acerto -- e mandar corrigir o que o build reescreve."""
+        d = self._projeto({"public/_headers": COMPLETO,
+                           "dist-demo/_headers": COMPLETO})
+        self.assertNotIn("headers.arquivo-fora-do-publish", self._regras(d))
+
+    def test_build_velho_nao_mascara_ausencia_na_fonte(self):
+        """A regressao mais perigosa desta familia: se a leitura incluisse a
+        saida de build, um `dist/` com CSP de um build anterior faria a uniao
+        dizer "tem CSP" enquanto a fonte esta' sem. Falso negativo vindo de
+        artefato."""
+        d = self._projeto({"public/_headers": "/*\n  X-Frame-Options: DENY\n",
+                           "dist-demo/_headers": COMPLETO})
+        regras = self._regras(d)
+        self.assertIn("headers.ausente.content-security-policy", regras)
+        # E a correcao tem de apontar para a FONTE, nao para o artefato.
+        alvo = [a["path"] for a in self._rodar(d)
+                if a["rule"] == "headers.ausente.content-security-policy"][0]
+        self.assertIn("public", alvo)
+        self.assertNotIn("dist", alvo)
+
+
+class TestSkipDirsDeploy(unittest.TestCase):
+    def test_cache_das_clis_de_deploy_e_ignorado(self):
+        """`.netlify/` guarda uma COPIA do netlify.toml e esta' no .gitignore.
+        Medido no Sunset: sem ignorar, o achado apontava para la' e mandava
+        editar um arquivo que o proximo deploy sobrescreve."""
+        self.assertIn(".netlify", raptor_win.SKIP_DIRS)
+        self.assertIn(".vercel", raptor_win.SKIP_DIRS)
