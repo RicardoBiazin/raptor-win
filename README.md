@@ -25,6 +25,7 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | RAPTOR rules + Registry packs (auto by language) | Fuzzing, binary analysis, `rr` |
 | **Dependency scanning (SCA) via OSV.dev** (`--sca`) | Generate exploits or patches |
 | **Typosquat detection** on dependency names (`--sca`) | — |
+| **GitHub Actions** in `.github/workflows` scanned as dependencies (`--sca`) | — |
 | **Secret scanning (`--secrets`)**, incl. secret files not in `.gitignore` | — |
 | **Live Postgres/Supabase catalog audit (`--db-audit`), read-only** | Write to your database (four layers stop it) |
 | De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
@@ -96,6 +97,15 @@ Windows launcher (puts `semgrep` on PATH automatically):
   reports known CVEs per package, with the fixed version and a link. SCA findings join SAST and
   secrets in Markdown, SARIF, accepted-risk baselines and `--fail-on`. Runs standalone too
   (`--sca --no-registry --no-raptor` = SCA only, no Semgrep needed).
+
+  SCA also reads `.github/workflows/*.yml` and treats every `uses: owner/repo@ref` as a
+  dependency — third-party code that runs with your repository token, and exactly how the
+  compromised `tj-actions/changed-files` reached OSV in March 2025. Actions take a **separate
+  query path**: OSV accepts the `GitHub Actions` ecosystem but cannot order its versions, so a
+  name+version query returns an empty result for *every* action — a check that can only ever say
+  "all clear". `raptor-win` therefore queries by **name**, then compares the ref locally. A ref it
+  cannot order (a SHA pin, a branch) or a floating major tag whose fix lands inside the same major
+  is reported as **needs review**, never as clean.
 - `--db-audit` — audit a **live** Postgres/Supabase catalog, **read-only**. Additive to the static
   scan; credentials come **only** from environment variables (never argv — that is visible to other
   processes via `ps`/Task Manager details and lands in shell history).

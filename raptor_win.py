@@ -445,6 +445,14 @@ def changed_files(target: Path, ref: str) -> "list[Path] | None":
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 OSV_VULN = "https://api.osv.dev/v1/vulns/"
 SCA_MANIFESTS = ("requirements.txt", "package-lock.json", "poetry.lock", "Pipfile.lock")
+
+# Workflows do GitHub Actions. As `uses:` de um workflow SAO dependencias --
+# codigo de terceiro que roda com o token do repositorio -- e o OSV as indexa
+# no ecossistema "GitHub Actions" (foi assim que o tj-actions/changed-files
+# comprometido em 03/2025 entrou na base). Ate' aqui o raptor-win nao olhava
+# para elas: um repo sem manifesto nenhum e com 10 actions de terceiros
+# recebia "0 dependencias verificadas ✅".
+GHA_ACTION_FILES = ("action.yml", "action.yaml")
 SCA_DETAIL_CAP = 120  # nº máx. de detalhes de vuln buscados (evita floods)
 
 
@@ -459,15 +467,32 @@ def _e_manifesto(nome: str) -> bool:
         nome.startswith("requirements") and nome.endswith(".txt"))
 
 
+def _e_workflow_gha(p: Path) -> bool:
+    """Workflow (`.github/workflows/*.yml`) ou action composta (`action.yml`).
+
+    Casa pelo DIRETORIO, nao so' pelo nome: `.github/workflows/ci.yml` nao tem
+    nada no nome que o distinga de qualquer outro YAML do projeto, e aceitar
+    todo `*.yml` encheria o relatorio de docker-compose e config de CI alheia.
+    """
+    if p.suffix.lower() not in (".yml", ".yaml"):
+        return False
+    if p.name in GHA_ACTION_FILES:
+        return True
+    partes = [x.lower() for x in p.parts]
+    return "workflows" in partes and ".github" in partes
+
+
 def find_manifests(targets: list[Path]) -> list[Path]:
     out: list[Path] = []
     for t in targets:
-        if t.is_file() and _e_manifesto(t.name):
+        if t.is_file() and (_e_manifesto(t.name) or _e_workflow_gha(t)):
             out.append(t)
             continue
         if t.is_dir():
             for p in t.rglob("*"):
-                if _e_manifesto(p.name) and p.is_file() and not any(x in SKIP_DIRS for x in p.parts):
+                if any(x in SKIP_DIRS for x in p.parts) or not p.is_file():
+                    continue
+                if _e_manifesto(p.name) or _e_workflow_gha(p):
                     out.append(p)
     return out
 
@@ -543,6 +568,59 @@ def parse_pipfile_lock(path: Path) -> list[tuple[str, str, str]]:
     return out
 
 
+# Casa `uses: owner/repo@ref` e `uses: owner/repo/sub@ref`, com ou sem aspas
+# YAML (`uses: "actions/checkout@v5"` e' legal e comum -- o padrao so'-sem-aspas
+# do upstream pulava essas linhas em silencio). O intervalo inicial e'
+# `\s*(?:-\s*)?`: os trechos de espaco ficam separados por um `-` obrigatorio,
+# entao uma linha longa so' de espacos nao explora O(n^2) particoes.
+_GHA_USES_RE = re.compile(
+    r"""^\s*(?:-\s*)?uses\s*:\s*
+        (?P<q>["']?)
+        (?P<spec>[A-Za-z0-9_./-]+@[A-Za-z0-9_./-]+)
+        (?P=q)
+        \s*(?:\#.*)?$""",
+    re.VERBOSE,
+)
+
+
+def parse_gha_workflow(path: Path) -> list[tuple[str, str, str]]:
+    """Extrai as `uses:` de um workflow como dependencias "GitHub Actions".
+
+    Fica de fora: `uses: ./acao-local` (codigo do proprio repo, nao e' terceiro)
+    e `docker://imagem@digest` (outro modelo de ameaca -- imagem, nao action).
+    """
+    try:
+        texto = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[tuple[str, str, str]] = []
+    for raw in texto.splitlines():
+        m = _GHA_USES_RE.match(raw)
+        if not m:
+            continue
+        spec = m.group("spec")
+        if spec.startswith(("./", "../", "docker://")):
+            continue
+        action, _, ref = spec.rpartition("@")
+        if "/" not in action or not ref:
+            continue
+        out.append(("GitHub Actions", action, ref))
+    return out
+
+
+def _versao_gha(ref: str) -> tuple[int, ...] | None:
+    """Converte a ref de uma action em tupla comparavel, ou None.
+
+    None para SHA de 40 digitos e para nomes de branch: nao da' para ordenar
+    `@main` contra `fixed: 46.0.1`. O chamador reporta esses casos como
+    "revisar", nunca como limpos -- um pin em branch e' MAIS exposto, nao menos.
+    """
+    m = re.match(r"^v?(\d+(?:\.\d+)*)$", ref.strip())
+    if not m:
+        return None
+    return tuple(int(x) for x in m.group(1).split("."))
+
+
 def enumerate_venv(target: Path) -> list[tuple[str, str, str]]:
     """Pacotes REALMENTE instalados num .venv/venv sob o alvo (via *.dist-info) —
     cobre projetos com requirements.txt sem versão pinada."""
@@ -587,6 +665,66 @@ def _osv_fixed(v: dict) -> str:
     return ", ".join(sorted(set(fixes)))
 
 
+OSV_QUERY = "https://api.osv.dev/v1/query"
+
+
+def _consulta_gha(deps: list[tuple[str, str, str]]) -> tuple[dict, dict, list]:
+    """Consulta o OSV para actions e casa a versao LOCALMENTE.
+
+    Por que nao entra no `querybatch` com as outras: o OSV aceita o ecossistema
+    "GitHub Actions", mas NAO sabe ordenar as versoes dele. Medido em 12/09/2026
+    contra o `tj-actions/changed-files` (o comprometido de 03/2025):
+
+        query name+version 45.0.7  -> []            <- "limpo", falso
+        query so' name              -> 2 advisories  <- a verdade
+
+    Mandar action com versao no batch, portanto, devolve sempre lista vazia:
+    seria uma checagem que so' sabe dizer "tudo bem". Entao pergunto pelo NOME,
+    recebo os advisories do pacote, e comparo a ref com o `fixed` aqui.
+
+    Devolve (hits, detalhes, revisar) -- `revisar` sao as actions com advisory
+    cuja ref nao da' para ordenar (SHA, branch) ou cujo `fixed` cai dentro do
+    mesmo major de uma tag flutuante.
+    """
+    hits: dict[tuple, list[str]] = {}
+    detalhes: dict[str, dict] = {}
+    revisar: list[dict] = []
+    porname: dict[str, list[dict]] = {}
+    for nome in dict.fromkeys(n for (_e, n, _v) in deps):
+        body = json.dumps({"package": {"name": nome, "ecosystem": "GitHub Actions"}}).encode()
+        req = urllib.request.Request(OSV_QUERY, data=body,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                porname[nome] = json.loads(r.read()).get("vulns") or []
+        except Exception:
+            porname[nome] = []          # degrada: nunca inventa "limpo" nem erro fatal
+    for dep in deps:
+        _eco, nome, ref = dep
+        for vuln in porname.get(nome, []):
+            vid = vuln["id"]
+            detalhes[vid] = vuln
+            corrigido = _versao_gha(_osv_fixed(vuln))
+            atual = _versao_gha(ref)
+            if atual is None or corrigido is None:
+                revisar.append({"name": nome, "ref": ref, "id": vid, "motivo":
+                                "ref nao ordenavel (SHA ou branch)" if atual is None
+                                else "advisory sem versao corrigida publicada"})
+                continue
+            if atual >= corrigido:
+                continue
+            # Tag de major solto (`@v5`) flutua: hoje ela aponta para o 5.x mais
+            # recente. Se o `fixed` esta' DENTRO do mesmo major, o repo
+            # provavelmente ja' pegou a correcao sem mudar o workflow -- acusar
+            # como vulneravel seria falso positivo. So' o major menor e' certeza.
+            if len(atual) == 1 and len(corrigido) > 1 and atual[0] == corrigido[0]:
+                revisar.append({"name": nome, "ref": ref, "id": vid, "motivo":
+                                f"tag flutuante @{ref}; corrigido em {_osv_fixed(vuln)}"})
+                continue
+            hits.setdefault(dep, []).append(vid)
+    return hits, detalhes, revisar
+
+
 def run_sca(targets: list[Path]) -> "dict | None":
     manifests = find_manifests(targets)
     parsers = {
@@ -603,6 +741,8 @@ def run_sca(targets: list[Path]) -> "dict | None":
         parser = parsers.get(m.name)
         if parser is None and m.name.startswith("requirements"):
             parser = parse_requirements
+        if parser is None and _e_workflow_gha(m):
+            parser = parse_gha_workflow
         if parser is None:
             continue
         got = parser(m)
@@ -643,8 +783,12 @@ def run_sca(targets: list[Path]) -> "dict | None":
         return {"sources": sources, "deps": 0, "vulns": {}}
     # O OSV exige versao exata; os sem pin ficam de fora DA CONSULTA, nunca do
     # relatorio (ver `sem_pin` abaixo).
-    pinados = [d for d in deps if d[2]]
-    sem_pin = [d for d in deps if not d[2]]
+    # Actions saem do batch: o OSV nao ordena as versoes desse ecossistema, entao
+    # elas vao por `_consulta_gha` (nome + comparacao local). Ver o docstring de la'.
+    gha = [d for d in deps if d[0] == "GitHub Actions"]
+    deps_osv = [d for d in deps if d[0] != "GitHub Actions"]
+    pinados = [d for d in deps_osv if d[2]]
+    sem_pin = [d for d in deps_osv if not d[2]]
     queries = [{"package": {"name": n, "ecosystem": e}, "version": v} for (e, n, v) in pinados]
     hits: dict[tuple, list[str]] = {}
     try:
@@ -659,10 +803,12 @@ def run_sca(targets: list[Path]) -> "dict | None":
                     hits[dep] = ids
     except Exception as ex:
         return {"error": str(ex), "sources": sources, "deps": len(deps)}
+    gha_hits, gha_details, gha_revisar = _consulta_gha(gha) if gha else ({}, {}, [])
+    hits.update(gha_hits)
     # busca detalhes (limitada) para severidade/summary/fix
-    details: dict[str, dict] = {}
+    details: dict[str, dict] = dict(gha_details)
     uniq = [vid for ids in hits.values() for vid in ids]
-    for vid in list(dict.fromkeys(uniq))[:SCA_DETAIL_CAP]:
+    for vid in [v for v in dict.fromkeys(uniq) if v not in details][:SCA_DETAIL_CAP]:
         try:
             with urllib.request.urlopen(OSV_VULN + vid, timeout=15) as r:
                 details[vid] = json.loads(r.read())
@@ -702,7 +848,19 @@ def run_sca(targets: list[Path]) -> "dict | None":
             "message": (f"{a['name']}@{a['version']}: {a['reason']}"),
             "context": f"SCA · {a['ecosystem']}",
         })
+    for r in gha_revisar:
+        findings.append({
+            "rule": r["id"],
+            "severity": "INFO",
+            "path": dep_paths.get(("GitHub Actions", r["name"], r["ref"]), ""),
+            "line": 1,
+            "message": (f"{r['name']}@{r['ref']}: advisory conhecido nesta action, "
+                        f"mas nao da' para confirmar pela ref ({r['motivo']}); "
+                        f"confira https://osv.dev/vulnerability/{r['id']}"),
+            "context": "SCA · GitHub Actions",
+        })
     return {"sources": sources, "deps": len(deps), "vulns": hits,
+            "gha_revisar": gha_revisar, "gha": len(gha),
             "details": details, "findings": findings, "typosquat": squat,
             "pinados": len(pinados), "sem_pin": sorted({n for (_e, n, _v) in sem_pin})}
 
@@ -756,9 +914,16 @@ def render_sca(sca: dict) -> None:
         return
     srcs = sca.get("sources", [])
     pinados = sca.get("pinados", sca.get("deps", 0))
-    print(f" fontes: {', '.join(dict.fromkeys(srcs)) or '—'}  ·  "
-          f"dependências encontradas: {sca.get('deps', 0)}  ·  "
-          f"com versão fixada (checadas no OSV): {pinados}")
+    # As actions nao entram em `pinados` (vao por outro caminho no OSV, ver
+    # `_consulta_gha`). Sem contar a parte delas aqui, o relatorio mostraria
+    # "20 encontradas / 12 checadas" e daria a entender que 8 ficaram de fora.
+    n_gha = sca.get("gha", 0)
+    linha = (f" fontes: {', '.join(dict.fromkeys(srcs)) or '—'}  ·  "
+             f"dependências encontradas: {sca.get('deps', 0)}  ·  "
+             f"com versão fixada (checadas no OSV): {pinados}")
+    if n_gha:
+        linha += f"  ·  actions do GitHub: {n_gha}"
+    print(linha)
     # Dizer o que NAO foi checado importa mais que o check verde: sem isto, um
     # requirements.txt todo em `>=` exibia "nenhuma vulnerável ✅" sem que uma
     # unica dependencia tivesse sido consultada.
@@ -768,6 +933,9 @@ def render_sca(sca: dict) -> None:
         print(f" ⚠ {len(sem_pin)} sem versão fixada — NÃO checadas contra CVE: {amostra}")
         print("   (fixe com `==` ou gere um lock para que possam ser verificadas)")
     _render_typosquat(sca.get("typosquat", []))
+    for r in sca.get("gha_revisar", []):
+        print(f" ⚠ {r['name']}@{r['ref']}: advisory {r['id']} nesta action, "
+              f"não confirmável pela ref ({r['motivo']})")
     hits = sca.get("vulns", {})
     if not hits:
         print(" Nenhuma dependência vulnerável conhecida. ✅")

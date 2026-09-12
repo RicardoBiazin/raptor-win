@@ -10,6 +10,7 @@ from unittest import mock
 
 import db_audit
 import raptor_win
+import raptor_win as R
 import typosquat
 
 
@@ -1100,3 +1101,141 @@ class SupabasePatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# GitHub Actions: descoberta, parser e casamento local de versao
+# ---------------------------------------------------------------------------
+
+class TestWorkflowsGHA(unittest.TestCase):
+    def test_reconhece_workflow_e_action_composta(self):
+        self.assertTrue(R._e_workflow_gha(Path(".github/workflows/ci.yml")))
+        self.assertTrue(R._e_workflow_gha(Path("a/.github/workflows/deploy.yaml")))
+        self.assertTrue(R._e_workflow_gha(Path("minha-acao/action.yml")))
+
+    def test_ignora_yaml_que_nao_e_workflow(self):
+        """docker-compose.yml e config de outras CIs nao sao workflows do GHA.
+
+        Aceitar todo `*.yml` encheria o SCA de arquivo que nao tem `uses:` --
+        e, pior, de `uses:` de outro dialeto que o OSV nao indexa.
+        """
+        self.assertFalse(R._e_workflow_gha(Path("docker-compose.yml")))
+        self.assertFalse(R._e_workflow_gha(Path("k8s/deploy.yaml")))
+        self.assertFalse(R._e_workflow_gha(Path("workflows/ci.yml")))  # sem .github
+        self.assertFalse(R._e_workflow_gha(Path(".github/dependabot.yml")))
+
+    def _wf(self, texto):
+        d = Path(tempfile.mkdtemp())
+        p = d / "ci.yml"
+        p.write_text(texto, encoding="utf-8")
+        return p
+
+    def test_extrai_uses_com_e_sem_aspas(self):
+        p = self._wf(
+            "jobs:\n  b:\n    steps:\n"
+            "      - uses: actions/checkout@v5\n"
+            '      - uses: "actions/setup-node@v4.1.0"\n'
+            "      - uses: 'org/repo/sub@abc123'\n"
+            "        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830\n"
+        )
+        got = R.parse_gha_workflow(p)
+        self.assertIn(("GitHub Actions", "actions/checkout", "v5"), got)
+        self.assertIn(("GitHub Actions", "actions/setup-node", "v4.1.0"), got)
+        self.assertIn(("GitHub Actions", "org/repo/sub", "abc123"), got)
+        self.assertEqual(len(got), 4)
+
+    def test_pula_acao_local_e_imagem_docker(self):
+        p = self._wf(
+            "      - uses: ./.github/actions/local@v1\n"
+            "      - uses: docker://alpine@sha256:deadbeef\n"
+            "      - uses: ./acao-sem-ref\n"
+        )
+        self.assertEqual(R.parse_gha_workflow(p), [])
+
+    def test_versao_gha_nao_ordena_sha_nem_branch(self):
+        """SHA e branch nao viram tupla: sem isso, `@main` compararia como 0."""
+        self.assertIsNone(R._versao_gha("0057852bfaa89a56745cba8c7296529d2fc39830"))
+        self.assertIsNone(R._versao_gha("main"))
+        self.assertIsNone(R._versao_gha(""))
+        self.assertEqual(R._versao_gha("v5"), (5,))
+        self.assertEqual(R._versao_gha("45.0.7"), (45, 0, 7))
+        self.assertEqual(R._versao_gha("v4.1.0"), (4, 1, 0))
+
+    def test_actions_nao_entram_no_querybatch(self):
+        """Regressao do motivo de existir `_consulta_gha`.
+
+        O OSV aceita o ecossistema "GitHub Actions" mas nao ordena as versoes
+        dele: perguntar nome+versao devolve SEMPRE lista vazia. Se uma action
+        vazar para o batch, ela volta "limpa" e o relatorio mente.
+        """
+        deps = [("GitHub Actions", "tj-actions/changed-files", "v44"),
+                ("PyPI", "requests", "2.0.0")]
+        pinados = [d for d in deps if d[0] != "GitHub Actions" and d[2]]
+        self.assertEqual(pinados, [("PyPI", "requests", "2.0.0")])
+
+
+class TestCasamentoLocalGHA(unittest.TestCase):
+    """`_consulta_gha` com o OSV dublado -- sem rede."""
+
+    def _rodar(self, dep, vulns):
+        def fake(req, timeout=0):
+            class R_:
+                def read(self_): return json.dumps({"vulns": vulns}).encode()
+                def __enter__(self_): return self_
+                def __exit__(self_, *a): return False
+            return R_()
+        with mock.patch.object(R.urllib.request, "urlopen", fake):
+            return R._consulta_gha([dep])
+
+    @staticmethod
+    def _adv(vid, fixed):
+        return {"id": vid, "affected": [{"ranges": [{"events": [
+            {"introduced": "0"}, {"fixed": fixed}]}]}]}
+
+    def test_ref_abaixo_do_fixed_e_vulneravel(self):
+        dep = ("GitHub Actions", "tj-actions/changed-files", "45.0.7")
+        hits, det, rev = self._rodar(dep, [self._adv("GHSA-x", "46.0.1")])
+        self.assertEqual(hits, {dep: ["GHSA-x"]})
+        self.assertEqual(rev, [])
+        self.assertIn("GHSA-x", det)
+
+    def test_ref_acima_do_fixed_esta_limpa(self):
+        dep = ("GitHub Actions", "tj-actions/changed-files", "46.0.1")
+        hits, _det, rev = self._rodar(dep, [self._adv("GHSA-x", "46.0.1")])
+        self.assertEqual(hits, {})
+        self.assertEqual(rev, [])
+
+    def test_sha_vai_para_revisar_nunca_para_limpo(self):
+        """Pin em SHA nao da' para ordenar. Silenciar seria dizer "tudo bem"."""
+        dep = ("GitHub Actions", "tj-actions/changed-files",
+               "0057852bfaa89a56745cba8c7296529d2fc39830")
+        hits, _det, rev = self._rodar(dep, [self._adv("GHSA-x", "46.0.1")])
+        self.assertEqual(hits, {})
+        self.assertEqual(len(rev), 1)
+        self.assertIn("não ordenável".replace("ã", "a").replace("á", "a"),
+                      rev[0]["motivo"].replace("ã", "a").replace("á", "a"))
+
+    def test_tag_de_major_solto_com_fixed_no_mesmo_major_e_revisar(self):
+        """`@v5` flutua: se o fixed e' 5.2.0, o repo ja' pode ter a correcao.
+
+        Acusar como vulneravel seria falso positivo; calar seria falso negativo.
+        """
+        dep = ("GitHub Actions", "org/acao", "v5")
+        hits, _det, rev = self._rodar(dep, [self._adv("GHSA-y", "5.2.0")])
+        self.assertEqual(hits, {})
+        self.assertEqual(len(rev), 1)
+
+    def test_tag_de_major_menor_que_o_major_corrigido_e_vulneravel(self):
+        """`@v4` com fixed em 5.2.0: nenhum 4.x carrega a correcao. E' certeza."""
+        dep = ("GitHub Actions", "org/acao", "v4")
+        hits, _det, rev = self._rodar(dep, [self._adv("GHSA-y", "5.2.0")])
+        self.assertEqual(hits, {dep: ["GHSA-y"]})
+        self.assertEqual(rev, [])
+
+    def test_osv_fora_do_ar_nao_derruba_nem_finge_limpo(self):
+        def boom(req, timeout=0):
+            raise OSError("sem rede")
+        dep = ("GitHub Actions", "org/acao", "v1")
+        with mock.patch.object(R.urllib.request, "urlopen", boom):
+            hits, det, rev = R._consulta_gha([dep])
+        self.assertEqual((hits, det, rev), ({}, {}, []))
