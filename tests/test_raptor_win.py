@@ -15,6 +15,7 @@ import headers_lint
 import raptor_win
 import secrets_scan
 import sql_lint
+import supply_chain
 import raptor_win as R
 import typosquat
 
@@ -1990,6 +1991,204 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 Deno.serve(async () => {
   const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!)
   return new Response('ok')
+})
+""", ".ts")
+        self.assertEqual(achados, set())
+
+
+# ---------------------------------------------------------------------------
+# Cadeia de suprimentos lida do lockfile (supply_chain)
+# ---------------------------------------------------------------------------
+
+class TestSupplyChain(unittest.TestCase):
+    def _lock(self, pacotes: dict) -> Path:
+        d = Path(tempfile.mkdtemp())
+        (d / "package-lock.json").write_text(
+            json.dumps({"lockfileVersion": 3,
+                        "packages": {"": {"name": "app"}, **pacotes}}),
+            encoding="utf-8")
+        return d
+
+    def _regras(self, d: Path) -> set:
+        return {a["rule"] for a in supply_chain.escanear([d], raptor_win.SKIP_DIRS)}
+
+    def test_script_de_instalacao_desconhecido(self):
+        """Codigo de terceiro que roda no `npm install` -- na maquina de quem
+        desenvolve e no CI, onde esta' o token do repositorio -- e roda ANTES
+        de qualquer teste ou revisao."""
+        d = self._lock({"node_modules/pacote-mau": {
+            "version": "1.0.0", "hasInstallScript": True,
+            "resolved": "https://registry.npmjs.org/pacote-mau/-/pacote-mau-1.0.0.tgz",
+            "integrity": "sha512-x"}})
+        self.assertIn("supply.script-de-instalacao", self._regras(d))
+
+    def test_install_script_conhecido_fica_calado(self):
+        """A calibracao que decide se esta checagem serve para alguma coisa.
+        Medida em quatro projetos reais: `hasInstallScript` apontava `fsevents`
+        nos quatro e `deno` num deles, e mais nada. Sem a allowlist a checagem
+        nasce 100% falso positivo -- e e' desligada na primeira execucao,
+        levando junto a atencao que o achado de verdade precisaria."""
+        d = self._lock({"node_modules/fsevents": {
+            "version": "2.3.3", "hasInstallScript": True,
+            "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+            "integrity": "sha512-y"}})
+        self.assertEqual(self._regras(d), set())
+
+    def test_resolvido_fora_do_registro(self):
+        d = self._lock({"node_modules/estranho": {
+            "version": "2.0.0",
+            "resolved": "https://npm.host-qualquer.com/estranho-2.0.0.tgz",
+            "integrity": "sha512-z"}})
+        self.assertIn("supply.fora-do-registro", self._regras(d))
+
+    def test_link_de_workspace_nao_e_procedencia_suspeita(self):
+        """Medido no omnichannel: `packages/core` e `web` apareciam como "host
+        fora do registro" numa primeira versao. Sao o proprio repositorio."""
+        d = self._lock({
+            "packages/core": {"version": "1.0.0", "resolved": "packages/core", "link": True},
+            "node_modules/@app/core": {"resolved": "file:../core", "version": "1.0.0"},
+        })
+        self.assertEqual(self._regras(d), set())
+
+    def test_sem_integrity(self):
+        d = self._lock({"node_modules/sem-hash": {
+            "version": "3.0.0",
+            "resolved": "https://registry.npmjs.org/sem-hash/-/sem-hash-3.0.0.tgz"}})
+        self.assertIn("supply.sem-integrity", self._regras(d))
+
+    def test_index_url_alternativo_em_requirements(self):
+        """Confusao de dependencia na forma mais direta: o pip consulta os dois
+        indices e fica com a versao MAIS ALTA, entao quem publicar um numero
+        maior do pacote interno no PyPI publico vence sem acesso nenhum."""
+        d = Path(tempfile.mkdtemp())
+        (d / "requirements.txt").write_text(
+            "--extra-index-url https://pypi.empresa.com/simple\nrequests==2.31.0\n",
+            encoding="utf-8")
+        achados = supply_chain.escanear([d], raptor_win.SKIP_DIRS)
+        self.assertEqual({a["rule"] for a in achados}, {"supply.index-url-extra"})
+
+    def test_lista_ausente_degrada_para_o_lado_seguro(self):
+        """Sem a allowlist, NAO acusar. O contrario -- acusar tudo porque um
+        arquivo de dados sumiu -- faz a ferramenta gritar justamente quando
+        algo nela quebrou."""
+        with mock.patch.object(supply_chain, "_ALLOWLIST", {}), \
+             mock.patch.object(supply_chain.Path, "read_text",
+                               side_effect=OSError("sumiu")):
+            self.assertEqual(supply_chain._allowlist("npm"), {})
+
+
+# ---------------------------------------------------------------------------
+# CWE nas tags do SARIF
+# ---------------------------------------------------------------------------
+
+class TestCweNoSarif(unittest.TestCase):
+    def test_extrai_os_tres_formatos_de_metadata(self):
+        """O campo `cwe` do Semgrep vem como string ou lista, com ou sem o
+        titulo depois do numero. As ferramentas downstream casam so' o
+        identificador."""
+        self.assertEqual(raptor_win._cwe_de({"cwe": "CWE-79: XSS"}), ["CWE-79"])
+        self.assertEqual(raptor_win._cwe_de({"cwe": ["CWE-89", "CWE-79: x"]}),
+                         ["CWE-89", "CWE-79"])
+        self.assertEqual(raptor_win._cwe_de({}), [])
+        self.assertEqual(raptor_win._cwe_de({"cwe": []}), [])
+
+    def test_sarif_leva_o_cwe_em_properties_tags(self):
+        """E' de `tool.driver.rules[].properties.tags` que o parser SARIF do
+        Faraday tira o CWE. Sem isto o SARIF e' valido e chega do outro lado
+        sem classificacao nenhuma."""
+        sarif = raptor_win.to_sarif([
+            {"rule": "a.b", "severity": "HIGH", "path": "x.ts", "line": 1,
+             "message": "m", "cwe": ["CWE-79"]},
+            {"rule": "c.d", "severity": "INFO", "path": "y.ts", "line": 2,
+             "message": "m"},
+        ])
+        regras = {r["id"]: r for r in sarif["runs"][0]["tool"]["driver"]["rules"]}
+        self.assertEqual(regras["a.b"]["properties"]["tags"], ["CWE-79"])
+        self.assertNotIn("properties", regras["c.d"])
+
+    def test_cwe_chega_mesmo_aparecendo_so_no_segundo_achado(self):
+        """O mesmo rule id pode entrar primeiro por um achado sem metadata."""
+        sarif = raptor_win.to_sarif([
+            {"rule": "a.b", "severity": "INFO", "path": "x.ts", "line": 1, "message": "m"},
+            {"rule": "a.b", "severity": "HIGH", "path": "y.ts", "line": 2,
+             "message": "m", "cwe": ["CWE-79"]},
+        ])
+        regra = sarif["runs"][0]["tool"]["driver"]["rules"][0]
+        self.assertEqual(regra["properties"]["tags"], ["CWE-79"])
+
+
+# ---------------------------------------------------------------------------
+# Regras de privacidade e de erro cru
+# ---------------------------------------------------------------------------
+
+class TestRegraDadoPessoalEmLog(_BaseRegras):
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "privacidade"
+    ARQ = "dado-pessoal-em-log.yaml"
+
+    def test_acesso_a_propriedade_sensivel(self):
+        achados = self._rodar(self.ARQ, """
+export function f(cliente: any) {
+  console.log('cliente', cliente.cpf)
+  console.error(cliente.cnpj)
+  console.debug(cliente.data_nascimento)
+}
+""", ".ts")
+        self.assertIn("dado-pessoal-em-log", achados)
+
+    def test_palavra_no_texto_da_mensagem_nao_e_acusada(self):
+        """Os oito falsos positivos medidos em quatro projetos eram TODOS
+        disto: a palavra dentro do texto, nao o dado. Casar acesso a
+        propriedade os elimina sem excecao especial."""
+        achados = self._rodar(self.ARQ, """
+export function f() {
+  console.log('a senha está errada')
+  console.error('A URL não tem senha definida')
+}
+""", ".ts")
+        self.assertEqual(achados, set())
+
+    def test_derivacao_segura_nao_e_acusada(self):
+        """`${senha.length}` loga o TAMANHO justamente para nao logar o valor.
+        Acusar quem fez a coisa certa e' o pior erro de um scanner."""
+        achados = self._rodar(self.ARQ,
+            "export function f(senha: string) {\n"
+            "  console.log(`✓ atualizada (${senha.length} caracteres)`)\n}\n", ".ts")
+        self.assertEqual(achados, set())
+
+    def test_campo_nao_sensivel_nao_e_acusado(self):
+        achados = self._rodar(self.ARQ,
+            "export function f(c: any) { console.log(c.id, c.nome) }\n", ".ts")
+        self.assertEqual(achados, set())
+
+
+class TestRegraErroCru(_BaseRegras):
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "erro"
+    ARQ = "erro-de-banco-para-o-cliente.yaml"
+
+    def test_erro_capturado_vai_inteiro_na_resposta(self):
+        """Quando `e` vem do supabase-js, `String(e)` traz a mensagem inteira
+        do Postgres: tabela, coluna, constraint, as vezes o valor que violou a
+        restricao."""
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async (req) => {
+  try {
+    return new Response('ok')
+  } catch (e) {
+    return new Response(JSON.stringify({ ok: false, error: String(e) }), { status: 500 })
+  }
+})
+""", ".ts")
+        self.assertIn("erro-cru-para-o-cliente", achados)
+
+    def test_mensagem_generica_com_id_de_correlacao_e_o_certo(self):
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async (req) => {
+  try {
+    return new Response('ok')
+  } catch (e) {
+    console.error('falha ao processar', e)
+    return new Response(JSON.stringify({ error: 'erro interno', id: crypto.randomUUID() }), { status: 500 })
+  }
 })
 """, ".ts")
         self.assertEqual(achados, set())

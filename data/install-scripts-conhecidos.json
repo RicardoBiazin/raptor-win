@@ -1,0 +1,33 @@
+{
+  "_comment": "Pacotes cujo script de instalacao e' esperado e nao e' sinal de nada. Sem esta lista a checagem de `hasInstallScript` nasce como 100% de falso positivo: medida em quatro projetos reais em 12/09/2026, ela apontava `fsevents` nos quatro e `deno` num deles -- e mais nada. Uma checagem que so' aponta o que sempre esteve certo e' desligada na primeira execucao, e leva junto a atencao que o achado de verdade precisaria. CURATION RULE: so' entra aqui pacote MUITO conhecido cujo script de instalacao tem razao tecnica publica e verificavel (binario nativo, download de toolchain). Popularidade sozinha nao basta -- foi exatamente por popularidade que pacotes comprometidos alcancaram tanta gente. Nomes em minusculas, comparados como estao.",
+  "npm": {
+    "fsevents": "binding nativo do FSEvents; so' instala no macOS e e' opcional em todo lugar",
+    "esbuild": "baixa o binario do compilador para a plataforma",
+    "@esbuild/darwin-arm64": "binario de plataforma do esbuild",
+    "@esbuild/darwin-x64": "binario de plataforma do esbuild",
+    "@esbuild/linux-x64": "binario de plataforma do esbuild",
+    "@esbuild/win32-x64": "binario de plataforma do esbuild",
+    "deno": "baixa o runtime Deno para a plataforma",
+    "sharp": "binding nativo do libvips",
+    "sqlite3": "binding nativo do SQLite",
+    "better-sqlite3": "binding nativo do SQLite",
+    "bcrypt": "binding nativo",
+    "canvas": "binding nativo do Cairo",
+    "node-sass": "binding nativo do LibSass",
+    "sass-embedded": "baixa o binario do compilador Dart Sass",
+    "puppeteer": "baixa o Chromium",
+    "playwright": "baixa os navegadores",
+    "playwright-core": "baixa os navegadores",
+    "cypress": "baixa o binario do Cypress",
+    "electron": "baixa o binario do Electron",
+    "core-js": "script de postinstall so' imprime aviso de patrocinio",
+    "core-js-pure": "script de postinstall so' imprime aviso de patrocinio",
+    "protobufjs": "gera tipos no postinstall",
+    "husky": "instala os hooks de git do proprio repositorio",
+    "swc": "binario nativo de plataforma",
+    "@swc/core": "binario nativo de plataforma",
+    "@parcel/watcher": "binding nativo de watcher de arquivos",
+    "unrs-resolver": "binding nativo do resolvedor",
+    "workerd": "runtime do Cloudflare Workers"
+  }
+}

@@ -33,6 +33,7 @@ from collections import Counter, defaultdict
 import baseline as baseline_mod
 import db_audit
 import headers_lint
+import supply_chain
 import secrets_scan
 import sql_lint
 import typosquat
@@ -290,6 +291,30 @@ def exigem_atencao(findings: list[dict]) -> list[dict]:
             if not any(marca in f["context"] for marca in DISPENSA_ATENCAO)]
 
 
+_CWE_RE = re.compile(r"CWE-\d+")
+
+
+def _cwe_de(metadata: dict) -> list[str]:
+    """Extrai os identificadores CWE do metadata de uma regra Semgrep.
+
+    O campo vem em tres formatos conforme quem escreveu a regra: string,
+    lista de strings, e com ou sem o titulo depois do numero
+    ("CWE-79: Improper Neutralization..."). Normalizo para so' o
+    identificador, que e' o que as ferramentas downstream casam.
+    """
+    bruto = metadata.get("cwe")
+    if not bruto:
+        return []
+    if isinstance(bruto, str):
+        bruto = [bruto]
+    achados: list[str] = []
+    for item in bruto:
+        for m in _CWE_RE.findall(str(item)):
+            if m not in achados:
+                achados.append(m)
+    return achados
+
+
 def collect(sg: dict) -> list[dict]:
     seen: set[tuple] = set()
     out: list[dict] = []
@@ -308,6 +333,7 @@ def collect(sg: dict) -> list[dict]:
             "line": line,
             "message": (r.get("extra", {}).get("message", "") or "").strip(),
             "context": classify_context(path, cid),
+            "cwe": _cwe_de(r.get("extra", {}).get("metadata") or {}),
         })
     out.sort(key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
     return out
@@ -387,7 +413,20 @@ def to_sarif(findings: list[dict]) -> dict:
     results = []
     for f in findings:
         rid = f["rule"]
-        rules.setdefault(rid, {"id": rid, "shortDescription": {"text": short_rule(rid)}})
+        # `properties.tags` com o CWE e' onde as ferramentas downstream o
+        # procuram -- o parser SARIF do Faraday, por exemplo, popula o campo
+        # CWE dele exatamente dali. Sem isto o SARIF do raptor-win e' valido,
+        # mas chega do outro lado sem classificacao nenhuma.
+        if rid not in rules:
+            regra = {"id": rid, "shortDescription": {"text": short_rule(rid)}}
+            tags = f.get("cwe") or []
+            if tags:
+                regra["properties"] = {"tags": list(tags)}
+            rules[rid] = regra
+        elif f.get("cwe") and "properties" not in rules[rid]:
+            # O mesmo rule id pode aparecer primeiro num achado sem metadata
+            # (um de baseline, por exemplo) e so' depois num com CWE.
+            rules[rid]["properties"] = {"tags": list(f["cwe"])}
         try:
             uri = os.path.relpath(f["path"]).replace("\\", "/")
         except ValueError:
@@ -1329,7 +1368,9 @@ def main() -> int:
     # vercel.json). Mesma natureza do sql_lint: leitura local, sem rede, sem
     # flag. E mesma razão de existir -- o Semgrep olha código, e esta
     # configuração não é código, então ninguém olhava.
-    sqlf = headers_lint.escanear(targets, SKIP_DIRS) + sql_lint.escanear(targets, SKIP_DIRS)
+    sqlf = (headers_lint.escanear(targets, SKIP_DIRS)
+            + supply_chain.escanear(targets, SKIP_DIRS)
+            + sql_lint.escanear(targets, SKIP_DIRS))
     if sqlf:
         # Mesma classificação de contexto dos achados do Semgrep (fixture/teste/
         # tooling), para que a contagem "exigem atenção" trate SQL igual ao resto.

@@ -32,6 +32,9 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | **Security headers** of the static host (`netlify.toml`, `_headers`, `vercel.json`) | Fetch your live site to check them |
 | **DOM XSS sinks in JS/TS** + DOMPurify misconfiguration | — |
 | **Supabase**: table never put under RLS, Edge Function running as `service_role` without reading the request, secret behind a bundler-public prefix | — |
+| **Supply chain** from the lockfile: install scripts, non-registry `resolved`, missing `integrity`, extra pip index | Download or execute the package |
+| **Personal data reaching a log** (LGPD: CPF, CNPJ, RG, PIS, CNS) | Cross-file taint (Semgrep OSS is intra-file) |
+| **Raw caught error returned to the client** | — |
 | De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
 | Console + Markdown + **SARIF** + raw JSON report | — |
 | Diff mode (`--changed`) + CI exit codes (`--fail-on`) | — |

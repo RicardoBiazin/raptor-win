@@ -1,0 +1,108 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Dado pessoal caindo em log.
+  #
+  # NAO e' regra do RAPTOR. A IDEIA e' do bearer -- que nao reporta "log
+  # injection" e sim QUAL dado cai no log --, mas nada dele foi copiado: o
+  # bearer e' Elastic License 2.0 e usa motor tree-sitter proprio, entao a
+  # licenca impede reaproveitar regra, e o formato impediria mesmo que nao
+  # impedisse. O que segue e' original.
+  #
+  # Vale mais aqui do que no bearer original porque a LGPD nomeia
+  # identificadores que ferramenta gringa nao procura: CPF, CNPJ, RG, PIS,
+  # PASEP, CNS, titulo de eleitor, CNH. Log de aplicacao e' retido, replicado
+  # para observabilidade e lido por muito mais gente que o banco -- e um CPF
+  # que cai ali sai do controle de acesso que a RLS impoe na tabela.
+  #
+  # PRECISAO -- o que esta regra NAO acusa, e por que:
+  #
+  # Medi a versao ingenua (regex do nome perto de um `console.log`) em quatro
+  # projetos: 8 ocorrencias, 8 falsas. TODAS eram a palavra dentro do TEXTO da
+  # mensagem -- "a senha esta' errada", "a URL nao tem senha" --, e uma delas
+  # era `${senha.length}`, que loga o TAMANHO de proposito, justamente para
+  # nao logar o valor.
+  #
+  # Por isso caso ACESSO A PROPRIEDADE (`cliente.cpf`), nunca texto e nunca
+  # variavel nua. O texto some sozinho: `console.log('a senha esta errada')`
+  # nao tem acesso a propriedade nenhum.
+  #
+  # A variavel nua saiu por medicao, nao por gosto. O Semgrep desce na
+  # interpolacao de template -- correto para `${senha}` -- mas prende a
+  # variavel tambem em `${senha.length}`, e nenhuma forma de `pattern-not`
+  # separa os dois casos. Ficaria: pegar `${senha}` (raro) ao preco de acusar
+  # `${senha.length}` (comum, e escrito EXATAMENTE para nao logar o valor).
+  # Num corpus de quatro projetos, `${senha.length}` apareceu e `${senha}` nao.
+  # Acusar quem fez a coisa certa e' o pior erro que um scanner comete, entao a
+  # variavel nua fica de fora -- e fica registrado que e' um limite conhecido,
+  # nao um esquecimento.
+  #
+  # Limite honesto: o Semgrep OSS faz taint DENTRO do arquivo. Isto casa o sink
+  # direto, nao segue o dado por cinco funcoes -- e nao promete isso. O proprio
+  # bearer cobra pelo interprocedural.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.privacidade.dado-pessoal-em-log
+    message: >-
+      Dado pessoal indo para log. Log de aplicacao e' retido por muito tempo,
+      copiado para observabilidade e lido por gente que nao tem acesso a`
+      tabela -- entao o dado sai do controle que a RLS impoe no banco, sem que
+      ninguem decida isso. Sob a LGPD, CPF, CNPJ, RG, PIS, CNS e titulo de
+      eleitor sao dado pessoal, e alguns sao sensiveis. Logue um
+      identificador opaco (o id da linha), ou mascare antes.
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: console.$M(..., $X, ...)
+          - pattern: logger.$M(..., $X, ...)
+          - pattern: $LOG.info(..., $X, ...)
+          - pattern: $LOG.warn(..., $X, ...)
+          - pattern: $LOG.error(..., $X, ...)
+          - pattern: $LOG.debug(..., $X, ...)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            # Acesso a VALOR: propriedade ou variavel nua. Texto de mensagem
+            # nao casa com nenhum dos dois -- e' ali que os oito falsos
+            # positivos medidos morrem.
+            - pattern: $OBJ.$CAMPO
+            - metavariable-regex:
+                metavariable: $CAMPO
+                regex: '^(?i)(cpf|cnpj|rg|pis|pasep|cns|cnh|titulo_eleitor|tituloEleitor|senha|password|passwd|cartao|cartao_credito|cardNumber|card_number|cvv|biometria|data_nascimento|dataNascimento|nascimento)$'
+    metadata:
+      cwe: ["CWE-532: Insertion of Sensitive Information into Log File"]
+      owasp_top_10: ["A09:2021-Security Logging and Monitoring Failures"]
+      tags: ["security", "privacidade", "lgpd", "logging", "pii"]
+
+  # ---------------------------------------------------------------------------
+  # O mesmo, em Python.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.privacidade.dado-pessoal-em-log.python
+    message: >-
+      Dado pessoal indo para log ou saida padrao. Sob a LGPD, CPF, CNPJ, RG,
+      PIS, CNS e titulo de eleitor sao dado pessoal. Log e' retido e lido por
+      quem nao tem acesso a` tabela: prefira um identificador opaco, ou
+      mascare antes.
+    languages: [python]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: print(..., $X, ...)
+          - pattern: logging.$M(..., $X, ...)
+          - pattern: $LOG.info(..., $X, ...)
+          - pattern: $LOG.warning(..., $X, ...)
+          - pattern: $LOG.error(..., $X, ...)
+          - pattern: $LOG.debug(..., $X, ...)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-either:
+                - pattern: $OBJ.$CAMPO
+                - pattern: $OBJ[$CAMPO]
+                - pattern: $CAMPO
+            - metavariable-regex:
+                metavariable: $CAMPO
+                regex: '^(?i)"?''?(cpf|cnpj|rg|pis|pasep|cns|cnh|titulo_eleitor|senha|password|passwd|cartao|cartao_credito|card_number|cvv|biometria|data_nascimento|nascimento)"?''?$'
+    metadata:
+      cwe: ["CWE-532: Insertion of Sensitive Information into Log File"]
+      owasp_top_10: ["A09:2021-Security Logging and Monitoring Failures"]
+      tags: ["security", "privacidade", "lgpd", "logging", "pii"]

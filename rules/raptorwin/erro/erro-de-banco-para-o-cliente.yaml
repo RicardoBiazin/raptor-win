@@ -1,0 +1,46 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Erro cru devolvido ao cliente.
+  #
+  # NAO e' regra do RAPTOR. A ideia vem do `errors.xml` do sqlmap -- 187 regex
+  # de mensagem de erro de ~38 bancos --, mas NADA dele foi copiado: o sqlmap e'
+  # GPLv2 e o raptor-win e' MIT, entao o corpus nao pode ser redistribuido aqui.
+  # O que se aproveita e' a observacao por tras dele, que e' publica: mensagem
+  # de erro de banco identifica o SGBD, e muitas vezes a tabela, a coluna e a
+  # constraint. O sqlmap usa isso para atacar; esta regra usa para achar quem
+  # esta' entregando.
+  #
+  # Medido em codigo real: quatro Edge Functions de um projeto proprio fazem
+  # `return new Response(JSON.stringify({ error: String(e) }), { status: 500 })`
+  # dentro do `catch`. Quando `e` vem do supabase-js, `String(e)` traz a
+  # mensagem inteira do Postgres -- nome de tabela, de coluna, de constraint, e
+  # as vezes o valor que violou a restricao. Quem provoca o erro de proposito
+  # recebe o mapa do schema de volta, uma consulta por vez, sem precisar de
+  # acesso nenhum.
+  #
+  # O certo e' o que o manual de seguranca do projeto ja' pede: mensagem
+  # generica para fora, detalhe so' no log do servidor.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.erro.erro-cru-para-o-cliente
+    message: >-
+      O objeto de erro capturado vai inteiro na resposta. Se ele veio do banco,
+      a mensagem carrega nome de tabela, de coluna e de constraint -- as vezes o
+      valor que violou a restricao. Quem provocar erros de proposito recebe o
+      mapa do schema de volta, sem precisar de acesso. Registre o erro completo
+      no log do servidor e devolva uma mensagem generica com um id de correlacao.
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-inside: |
+          try { ... } catch ($E) { ... }
+      - pattern-either:
+          - pattern: new Response(JSON.stringify(<... $E ...>), ...)
+          - pattern: new Response(String($E), ...)
+          - pattern: new Response($E.message, ...)
+          - pattern: res.json(<... $E ...>)
+          - pattern: res.send(<... $E ...>)
+          - pattern: res.status($S).json(<... $E ...>)
+    metadata:
+      cwe: ["CWE-209: Generation of Error Message Containing Sensitive Information"]
+      owasp_top_10: ["A05:2021-Security Misconfiguration"]
+      tags: ["security", "error-handling", "information-disclosure", "supabase"]
