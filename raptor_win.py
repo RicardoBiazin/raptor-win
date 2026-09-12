@@ -444,7 +444,8 @@ def changed_files(target: Path, ref: str) -> "list[Path] | None":
 # ── SCA (Software Composition Analysis) via OSV.dev — só stdlib, sem chave ──────
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 OSV_VULN = "https://api.osv.dev/v1/vulns/"
-SCA_MANIFESTS = ("requirements.txt", "package-lock.json", "poetry.lock", "Pipfile.lock")
+SCA_MANIFESTS = ("requirements.txt", "package-lock.json", "npm-shrinkwrap.json",
+                 "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "Pipfile.lock")
 
 # Workflows do GitHub Actions. As `uses:` de um workflow SAO dependencias --
 # codigo de terceiro que roda com o token do repositorio -- e o OSV as indexa
@@ -540,7 +541,195 @@ def parse_package_lock(path: Path) -> list[tuple[str, str, str]]:
                     out.add(("npm", name, ver))
                 walk((v or {}).get("dependencies"))
         walk(data.get("dependencies"))
-    return sorted(out)
+    return _sem_versao_redundante(out)
+
+
+_ASPAS = "\"'"  # os dois tipos de aspas que YAML/yarn usam em volta das chaves
+
+
+def _nome_versao_npm(spec: str) -> tuple[str, str] | None:
+    """Separa `nome@versao` de um spec npm, respeitando o escopo.
+
+    O `@` do escopo nao e' separador: em `@scope/name@1.0` quem divide e' o
+    SEGUNDO `@`. Partir no primeiro devolveria nome vazio e versao
+    `scope/name@1.0` -- consulta que o OSV responde com nada, ou seja, um
+    "limpo" falso para todo pacote com escopo.
+    """
+    spec = spec.strip().strip(_ASPAS)
+    if spec.startswith("@"):
+        barra = spec.find("/")
+        if barra == -1:
+            return None
+        at = spec.find("@", barra)
+    else:
+        at = spec.find("@")
+    if at <= 0 or at >= len(spec) - 1:
+        return None
+    return spec[:at], spec[at + 1:]
+
+
+# Versao que nao veio do registro publico: o OSV nao tem o que casar com
+# `file:`, `workspace:` ou um tarball. Entram no relatorio sem versao -- o nome
+# ainda serve para o typosquat --, nunca como "checado".
+_NPM_FORA_DO_REGISTRO = ("file:", "link:", "workspace:", "http:", "https:",
+                         "git:", "git+", "github:", "portal:", "patch:")
+
+
+def _limpa_versao_npm(versao: str) -> str:
+    """Tira as anotacoes que o pnpm/yarn grudam na versao.
+
+    O pnpm codifica a resolucao de peer-dep na propria chave, em dois formatos:
+    v6+ `29.0.3(typescript@5.0)` e v5 `29.0.3_typescript@5.0.0`. O yarn Berry
+    usa `npm:` como protocolo (`lodash@npm:4.17.21`). Nada disso e' versao para
+    o OSV -- e mandar `29.0.3(typescript@5.0)` significa receber lista vazia.
+    """
+    versao = versao.strip().strip(_ASPAS)
+    if versao.startswith("npm:"):
+        versao = versao[4:]
+        # `@scope/real@1.0` = alias do yarn: o que vale e' o pacote de verdade.
+        alvo = _nome_versao_npm(versao)
+        if alvo:
+            versao = alvo[1]
+    for corte in ("(", "_"):
+        i = versao.find(corte)
+        if i > 0:
+            versao = versao[:i]
+    if versao.startswith(_NPM_FORA_DO_REGISTRO):
+        return ""
+    return versao
+
+
+_CHAVE_V6 = re.compile(r"^/(?P<nome>(?:@[^/]+/)?[^/@]+)@(?P<versao>.+)$")
+_CHAVE_V5 = re.compile(r"^/(?P<nome>(?:@[^/]+/)?[^/]+)/(?P<versao>.+)$")
+
+
+def _sem_versao_redundante(deps: set) -> list[tuple[str, str, str]]:
+    """Descarta a linha SEM versao de um pacote que ja' tem outra COM versao.
+
+    O yarn Berry registra um pacote duas vezes quando ele leva patch embutido:
+    `typescript@npm:^5.5.3` (versao 5.9.3) e
+    `typescript@patch:typescript@npm%3A^5.5.3#optional!builtin<...>`, cujo
+    intervalo `patch:` nao e' do registro e portanto nao rende versao. Guardar
+    as duas faz o `typescript` aparecer na lista de "sem versao fixada -- NAO
+    checadas" mesmo tendo sido checado na outra linha: um aviso que manda o
+    usuario fixar o que ja' esta' fixo.
+
+    So' cai a linha vazia que TEM par versionado. A do pacote local
+    (`meu-pkg@file:../meu`), que nao tem par, fica -- essa nao foi checada
+    mesmo, e calar seria o erro oposto.
+    """
+    com_versao = {(e, n) for (e, n, v) in deps if v}
+    return sorted(d for d in deps if d[2] or (d[0], d[1]) not in com_versao)
+
+
+def parse_pnpm_lock(path: Path) -> list[tuple[str, str, str]]:
+    """Le' `pnpm-lock.yaml` sem depender de um parser YAML.
+
+    Tres formatos dividem o mesmo nome de arquivo, e as chaves mudam nos tres:
+
+        v5 (pnpm 7-)   packages:  `/lodash/4.17.21`
+        v6 (pnpm 8)    packages:  `/lodash@4.17.21`
+        v9 (pnpm 9+)   packages:  `lodash@4.17.21`, e o grafo resolvido migra
+                                  para um mapa irmao `snapshots:`
+
+    So' preciso do conjunto (nome, versao), e ele esta' inteiro nas CHAVES
+    desses dois mapas -- entao varro linha a linha em vez de trazer o PyYAML,
+    que seria a unica dependencia do raptor-win alem do semgrep. Uno `packages`
+    com `snapshots`: no v9 ha' transitiva que so' existe no segundo.
+    """
+    try:
+        texto = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: set[tuple[str, str, str]] = set()
+    dentro = False
+    for raw in texto.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if not raw[:1].isspace():                       # chave de topo
+            dentro = raw.split(":", 1)[0].strip() in ("packages", "snapshots")
+            continue
+        if not dentro:
+            continue
+        # Entrada do mapa: exatamente um nivel de indentacao e termina em `:`.
+        if len(raw) - len(raw.lstrip()) != 2 or not raw.rstrip().endswith(":"):
+            continue
+        chave = raw.strip()[:-1].strip().strip(_ASPAS)
+        if chave.startswith("/"):
+            # v6 ANTES de v5, e as duas ancoradas. Cair no separador errado da'
+            # nome torto sem erro nenhum: em `/jest/29.0.3_typescript@5.0.0`
+            # (v5) uma busca solta pelo `@` parte no `@` do peer-dep e produz
+            # `jest/29.0.3_typescript@5.0.0` -> nome `jest/29.0.3_typescript`,
+            # versao `5.0.0`. O OSV responde vazio, e a dependencia consta
+            # como checada. Por isso o segmento do nome em _CHAVE_V6 proibe
+            # `/` e `@`: assim a forma v5 nao casa com ela e desce para v5.
+            m = _CHAVE_V6.match(chave) or _CHAVE_V5.match(chave)
+            if not m:
+                continue
+            nv = (m.group("nome"), m.group("versao"))
+        else:
+            nv = _nome_versao_npm(chave)
+        if nv is None:
+            continue
+        nome, versao = nv[0], _limpa_versao_npm(nv[1])
+        if nome:
+            out.add(("npm", nome, versao))
+    return _sem_versao_redundante(out)
+
+
+def parse_yarn_lock(path: Path) -> list[tuple[str, str, str]]:
+    """Le' `yarn.lock` -- classico (v1) e Berry (v2+), pelo mesmo caminho.
+
+    O v1 NAO e' YAML valido (valores vem com aspas embutidas), entao um parser
+    YAML nao resolveria os dois de qualquer jeito. Mas as duas formas tem a
+    mesma silhueta: um cabecalho de bloco na coluna 0 com o(s) descritor(es), e
+    uma linha `version` indentada dentro. E' o que eu leio.
+
+        v1      "@types/node@^20.5.0", "@types/node@^20.10.0":
+                  version "20.11.5"
+        Berry   "lodash@npm:^4.17.21":
+                  version: 4.17.21
+
+    O nome sai do descritor (o intervalo pedido nao interessa); a versao
+    RESOLVIDA sai da linha `version`, que e' a que o OSV sabe casar.
+    """
+    try:
+        texto = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: set[tuple[str, str, str]] = set()
+    nome_atual = ""
+    do_registro = True
+    for raw in texto.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if not raw[:1].isspace():
+            nome_atual = ""
+            if not raw.rstrip().endswith(":"):
+                continue
+            primeiro = raw.rstrip()[:-1].split(",")[0]
+            nv = _nome_versao_npm(primeiro)
+            # `__metadata:` do Berry e outras chaves de topo nao sao pacote.
+            if nv:
+                nome_atual = nv[0]
+                # O intervalo do descritor e' que diz se o pacote veio do
+                # registro. `meu-pkg@file:../meu` e `meu-app@workspace:.` tem
+                # bloco `version` como qualquer outro -- "0.0.0",
+                # "0.0.0-use.local" --, e essa versao NAO existe no npm. Sem
+                # olhar aqui, o pacote local entrava na consulta, voltava sem
+                # advisory (obvio: o OSV nunca ouviu falar dele) e era contado
+                # como "checado". O nome segue para o typosquat; a versao, nao.
+                do_registro = not nv[1].startswith(_NPM_FORA_DO_REGISTRO)
+            continue
+        if not nome_atual:
+            continue
+        corpo = raw.strip()
+        if corpo.startswith("version"):
+            valor = corpo[len("version"):].lstrip(": ").strip()
+            versao = _limpa_versao_npm(valor) if do_registro else ""
+            out.add(("npm", nome_atual, versao))
+            nome_atual = ""
+    return _sem_versao_redundante(out)
 
 
 def parse_poetry_lock(path: Path) -> list[tuple[str, str, str]]:
@@ -729,11 +918,17 @@ def run_sca(targets: list[Path]) -> "dict | None":
     manifests = find_manifests(targets)
     parsers = {
         "requirements.txt": parse_requirements, "package-lock.json": parse_package_lock,
+        # npm-shrinkwrap.json tem EXATAMENTE o formato do package-lock e tem
+        # precedencia sobre ele quando os dois existem. Sem esta linha, um
+        # projeto que publica shrinkwrap era lido como se nao tivesse lock.
+        "npm-shrinkwrap.json": parse_package_lock,
+        "pnpm-lock.yaml": parse_pnpm_lock, "yarn.lock": parse_yarn_lock,
         "poetry.lock": parse_poetry_lock, "Pipfile.lock": parse_pipfile_lock,
     }
     deps: list[tuple[str, str, str]] = []
     dep_paths: dict[tuple[str, str, str], str] = {}
     sources: list[str] = []
+    vazios: list[str] = []
     for m in manifests:
         # Despacho por nome EXATO quebrava nas variantes que a descoberta passou
         # a aceitar (`requirements-nuvem.txt` levantava KeyError e derrubava a
@@ -751,6 +946,16 @@ def run_sca(targets: list[Path]) -> "dict | None":
             for dep in got:
                 dep_paths.setdefault(dep, str(m))
             sources.append(m.name)
+        else:
+            # Manifesto que EXISTE e nao rendeu linha nenhuma. Descartar em
+            # silencio -- ele nem entrava em `sources` -- e' o pior resultado
+            # possivel: o relatorio conclui "0 dependencias verificadas ✅"
+            # sobre um projeto que declara dependencia, e quem le' entende que
+            # esta' tudo checado. Pode ser lock genuinamente vazio, ou pode ser
+            # um formato que eu achei que sabia ler e nao sei. Os dois casos
+            # merecem o nome do arquivo no relatorio; qual dos dois e', quem
+            # decide e' quem conhece o projeto.
+            vazios.append(str(m))
     for t in targets:  # pacotes instalados em .venv (cobre requirements sem pin)
         if t.is_dir():
             venv_deps = enumerate_venv(t)
@@ -780,7 +985,7 @@ def run_sca(targets: list[Path]) -> "dict | None":
     seen: set = set()
     deps = [d for d in deps if not (_chave(d) in seen or seen.add(_chave(d)))]
     if not deps:
-        return {"sources": sources, "deps": 0, "vulns": {}}
+        return {"sources": sources, "deps": 0, "vulns": {}, "vazios": vazios}
     # O OSV exige versao exata; os sem pin ficam de fora DA CONSULTA, nunca do
     # relatorio (ver `sem_pin` abaixo).
     # Actions saem do batch: o OSV nao ordena as versoes desse ecossistema, entao
@@ -802,7 +1007,8 @@ def run_sca(targets: list[Path]) -> "dict | None":
                 if ids:
                     hits[dep] = ids
     except Exception as ex:
-        return {"error": str(ex), "sources": sources, "deps": len(deps)}
+        return {"error": str(ex), "sources": sources, "deps": len(deps),
+                "vazios": vazios}
     gha_hits, gha_details, gha_revisar = _consulta_gha(gha) if gha else ({}, {}, [])
     hits.update(gha_hits)
     # busca detalhes (limitada) para severidade/summary/fix
@@ -860,7 +1066,7 @@ def run_sca(targets: list[Path]) -> "dict | None":
             "context": "SCA · GitHub Actions",
         })
     return {"sources": sources, "deps": len(deps), "vulns": hits,
-            "gha_revisar": gha_revisar, "gha": len(gha),
+            "gha_revisar": gha_revisar, "gha": len(gha), "vazios": vazios,
             "details": details, "findings": findings, "typosquat": squat,
             "pinados": len(pinados), "sem_pin": sorted({n for (_e, n, _v) in sem_pin})}
 
@@ -911,6 +1117,8 @@ def render_sca(sca: dict) -> None:
     print("=" * 62)
     if sca.get("error"):
         print(f" ⚠ OSV indisponível ({sca['error']}). {sca.get('deps', 0)} dependência(s) não checada(s).")
+        for caminho in sca.get("vazios", []):
+            print(f" ⚠ {caminho}: nenhuma dependência extraída deste arquivo")
         return
     srcs = sca.get("sources", [])
     pinados = sca.get("pinados", sca.get("deps", 0))
@@ -932,6 +1140,14 @@ def render_sca(sca: dict) -> None:
         amostra = ", ".join(sem_pin[:6]) + ("…" if len(sem_pin) > 6 else "")
         print(f" ⚠ {len(sem_pin)} sem versão fixada — NÃO checadas contra CVE: {amostra}")
         print("   (fixe com `==` ou gere um lock para que possam ser verificadas)")
+    # Mesmo espirito do aviso acima: dizer o que NAO foi checado vale mais que
+    # o visto verde. Um lock ilegivel some do relatorio inteiro se ninguem o
+    # nomear -- e o silencio se parece exatamente com "esta' tudo certo".
+    for caminho in sca.get("vazios", []):
+        print(f" ⚠ {caminho}: nenhuma dependência extraída deste arquivo")
+    if sca.get("vazios"):
+        print("   (ou o arquivo está vazio, ou o raptor-win não soube lê-lo —")
+        print("    confira antes de tratar o resultado como 'sem dependências')")
     _render_typosquat(sca.get("typosquat", []))
     for r in sca.get("gha_revisar", []):
         print(f" ⚠ {r['name']}@{r['ref']}: advisory {r['id']} nesta action, "

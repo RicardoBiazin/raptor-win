@@ -24,6 +24,7 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | Static analysis (Semgrep) | Run/execute any target code |
 | RAPTOR rules + Registry packs (auto by language) | Fuzzing, binary analysis, `rr` |
 | **Dependency scanning (SCA) via OSV.dev** (`--sca`) | Generate exploits or patches |
+| npm lockfiles: `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock` | — |
 | **Typosquat detection** on dependency names (`--sca`) | — |
 | **GitHub Actions** in `.github/workflows` scanned as dependencies (`--sca`) | — |
 | **Secret scanning (`--secrets`)**, incl. secret files not in `.gitignore` | — |
@@ -92,11 +93,20 @@ Windows launcher (puts `semgrep` on PATH automatically):
   reads. Measured on three real repositories: **0 false positives**.
 
 - `--sca` — also run **dependency scanning (SCA)**: parses `requirements.txt`, `package-lock.json`,
-  `poetry.lock`, `Pipfile.lock`, **and enumerates packages actually installed in a project's `.venv`**
+  `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `Pipfile.lock`,
+  **and enumerates packages actually installed in a project's `.venv`**
   (so unpinned `requirements.txt` still gets checked), then queries **OSV.dev** (free, no key) and
   reports known CVEs per package, with the fixed version and a link. SCA findings join SAST and
   secrets in Markdown, SARIF, accepted-risk baselines and `--fail-on`. Runs standalone too
   (`--sca --no-registry --no-raptor` = SCA only, no Semgrep needed).
+
+  pnpm and yarn lockfiles are read **without a YAML parser**. Semgrep is raptor-win's only
+  dependency and that is worth keeping: pulling in PyYAML for two parsers is a poor trade, and
+  it would not even cover both — yarn classic v1 is *not* valid YAML. All five shapes
+  (pnpm v5/v6/v9, yarn v1/Berry) put the resolved name and version in map keys or in a
+  `version` line, so a line-wise read gets them. A lockfile that is found but yields nothing
+  is **named in the report** rather than dropped: silence there is indistinguishable from
+  "no dependencies", which is the failure this whole check exists to prevent.
 
   SCA also reads `.github/workflows/*.yml` and treats every `uses: owner/repo@ref` as a
   dependency — third-party code that runs with your repository token, and exactly how the

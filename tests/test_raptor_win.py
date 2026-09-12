@@ -1239,3 +1239,229 @@ class TestCasamentoLocalGHA(unittest.TestCase):
         with mock.patch.object(R.urllib.request, "urlopen", boom):
             hits, det, rev = R._consulta_gha([dep])
         self.assertEqual((hits, det, rev), ({}, {}, []))
+
+
+# ---------------------------------------------------------------------------
+# Lockfiles npm alem do package-lock: pnpm (3 formatos) e yarn (2)
+# ---------------------------------------------------------------------------
+
+class TestNomeVersaoNpm(unittest.TestCase):
+    def test_escopo_nao_e_separador(self):
+        """`@scope/name@1.0` parte no SEGUNDO `@`, nunca no primeiro.
+
+        Partir no primeiro devolve nome vazio e versao `types/node@20.11.5` --
+        consulta que o OSV responde com nada, ou seja, um "limpo" falso para
+        todo pacote com escopo (metade de um projeto React tipico).
+        """
+        self.assertEqual(R._nome_versao_npm("@types/node@20.11.5"),
+                         ("@types/node", "20.11.5"))
+        self.assertEqual(R._nome_versao_npm("lodash@4.17.21"),
+                         ("lodash", "4.17.21"))
+
+    def test_recusa_o_que_nao_tem_versao(self):
+        self.assertIsNone(R._nome_versao_npm("lodash"))
+        self.assertIsNone(R._nome_versao_npm("@types/node"))
+        self.assertIsNone(R._nome_versao_npm("@semescopo"))
+        self.assertIsNone(R._nome_versao_npm("@types/node@"))
+
+    def test_limpa_anotacoes_de_peer_e_protocolo(self):
+        self.assertEqual(R._limpa_versao_npm("29.0.3(typescript@5.0.4)"), "29.0.3")
+        self.assertEqual(R._limpa_versao_npm("29.0.3_typescript@5.0.0"), "29.0.3")
+        self.assertEqual(R._limpa_versao_npm("npm:4.17.21"), "4.17.21")
+        self.assertEqual(R._limpa_versao_npm("4.17.21"), "4.17.21")
+
+    def test_alias_do_yarn_resolve_no_pacote_real(self):
+        """`ali@npm:@scope/real@1.0`: quem tem CVE e' o pacote de destino."""
+        self.assertEqual(R._limpa_versao_npm("npm:@scope/real@1.2.3"), "1.2.3")
+
+    def test_fonte_fora_do_registro_nao_vira_versao(self):
+        """O OSV nao tem o que casar com `file:`/`workspace:`; fingir que tem
+        seria contar a dependencia como checada sem checagem nenhuma."""
+        for v in ("file:../meu", "workspace:.", "link:../x", "git+https://h/r",
+                  "patch:typescript@npm%3A5.9.3#optional"):
+            self.assertEqual(R._limpa_versao_npm(v), "", v)
+
+
+class TestPnpmLock(unittest.TestCase):
+    def _arq(self, texto):
+        p = Path(tempfile.mkdtemp()) / "pnpm-lock.yaml"
+        p.write_text(texto, encoding="utf-8")
+        return p
+
+    def test_v5_chave_com_barra(self):
+        p = self._arq(
+            "lockfileVersion: 5.4\n"
+            "packages:\n"
+            "  /lodash/4.17.21:\n"
+            "    resolution: {integrity: sha512-x}\n"
+            "  /@types/node/20.11.5:\n"
+            "    resolution: {integrity: sha512-y}\n")
+        self.assertEqual(R.parse_pnpm_lock(p),
+                         [("npm", "@types/node", "20.11.5"),
+                          ("npm", "lodash", "4.17.21")])
+
+    def test_v5_peer_dep_nao_desloca_o_nome(self):
+        """Regressao: `/jest/29.0.3_typescript@5.0.0`.
+
+        Buscar o `@` solto parte no peer-dep e produz nome
+        `jest/29.0.3_typescript` com versao `5.0.0` -- que o OSV responde
+        vazio, deixando a dependencia contada como checada e limpa. Por isso
+        `_CHAVE_V6` proibe `/` e `@` no segmento do nome (assim a forma v5 nao
+        casa com ela) e e' tentada ANTES da v5.
+        """
+        p = self._arq("packages:\n  /jest/29.0.3_typescript@5.0.0:\n"
+                      "    resolution: {integrity: sha512-z}\n")
+        self.assertEqual(R.parse_pnpm_lock(p), [("npm", "jest", "29.0.3")])
+
+    def test_v6_chave_com_arroba(self):
+        p = self._arq(
+            "lockfileVersion: '6.0'\n"
+            "packages:\n"
+            "  /lodash@4.17.21:\n"
+            "    resolution: {integrity: sha512-x}\n"
+            "  /@types/node@20.11.5:\n"
+            "    resolution: {integrity: sha512-y}\n"
+            "  /jest@29.0.3(typescript@5.0.4):\n"
+            "    resolution: {integrity: sha512-z}\n")
+        self.assertEqual(R.parse_pnpm_lock(p),
+                         [("npm", "@types/node", "20.11.5"),
+                          ("npm", "jest", "29.0.3"),
+                          ("npm", "lodash", "4.17.21")])
+
+    def test_v9_une_packages_com_snapshots(self):
+        """No v9 o grafo resolvido migra para `snapshots`: ha' transitiva que
+        SO' existe la'. Ler apenas `packages` perderia essas."""
+        p = self._arq(
+            "lockfileVersion: '9.0'\n"
+            "packages:\n"
+            "  lodash@4.17.21:\n"
+            "    resolution: {integrity: sha512-x}\n"
+            "snapshots:\n"
+            "  lodash@4.17.21: {}\n"
+            "  jest@29.0.3(typescript@5.0.4):\n"
+            "    dependencies:\n"
+            "      chalk: 4.1.2\n")
+        self.assertEqual(R.parse_pnpm_lock(p),
+                         [("npm", "jest", "29.0.3"), ("npm", "lodash", "4.17.21")])
+
+    def test_v9_chave_com_escopo_entre_aspas(self):
+        p = self._arq("lockfileVersion: '9.0'\npackages:\n"
+                      "  '@types/node@20.11.5':\n"
+                      "    resolution: {integrity: sha512-y}\n")
+        self.assertEqual(R.parse_pnpm_lock(p), [("npm", "@types/node", "20.11.5")])
+
+    def test_pacote_local_fica_sem_versao_mas_nao_some(self):
+        """Sem versao consultavel, mas o NOME ainda alimenta o typosquat."""
+        p = self._arq("lockfileVersion: '9.0'\npackages:\n"
+                      "  meu-pkg@file:packages/meu:\n"
+                      "    resolution: {directory: packages/meu}\n")
+        self.assertEqual(R.parse_pnpm_lock(p), [("npm", "meu-pkg", "")])
+
+    def test_ignora_blocos_que_nao_sao_packages(self):
+        """`importers` tem nomes de pacote indentados iguais aos de `packages`.
+        Ler tudo traria o intervalo PEDIDO no lugar da versao resolvida."""
+        p = self._arq(
+            "importers:\n"
+            "  .:\n"
+            "    dependencies:\n"
+            "      lodash:\n"
+            "        specifier: ^4.17.21\n"
+            "        version: 4.17.21\n"
+            "packages:\n"
+            "  lodash@4.17.21:\n"
+            "    resolution: {integrity: sha512-x}\n")
+        self.assertEqual(R.parse_pnpm_lock(p), [("npm", "lodash", "4.17.21")])
+
+
+class TestYarnLock(unittest.TestCase):
+    def _arq(self, texto):
+        p = Path(tempfile.mkdtemp()) / "yarn.lock"
+        p.write_text(texto, encoding="utf-8")
+        return p
+
+    def test_classico_v1(self):
+        p = self._arq(
+            "# yarn lockfile v1\n\n\n"
+            '"@types/node@^20.5.0", "@types/node@^20.10.0":\n'
+            '  version "20.11.5"\n'
+            '  resolved "https://registry.yarnpkg.com/@types/node/-/node-20.11.5.tgz#abc"\n\n'
+            "lodash@^4.17.21:\n"
+            '  version "4.17.21"\n')
+        self.assertEqual(R.parse_yarn_lock(p),
+                         [("npm", "@types/node", "20.11.5"),
+                          ("npm", "lodash", "4.17.21")])
+
+    def test_berry_v2_mais(self):
+        p = self._arq(
+            "__metadata:\n  version: 8\n  cacheKey: 10c0\n\n"
+            '"lodash@npm:^4.17.21":\n'
+            "  version: 4.17.21\n"
+            '  resolution: "lodash@npm:4.17.21"\n'
+            "  linkType: hard\n")
+        self.assertEqual(R.parse_yarn_lock(p), [("npm", "lodash", "4.17.21")])
+
+    def test_metadata_nao_vira_pacote(self):
+        p = self._arq("__metadata:\n  version: 8\n  cacheKey: 10c0\n")
+        self.assertEqual(R.parse_yarn_lock(p), [])
+
+    def test_workspace_nao_herda_a_versao_do_bloco(self):
+        """`meu-app@workspace:.` tem `version: 0.0.0-use.local` -- versao que
+        nao existe no npm. Manda-la ao OSV e' checagem so' na aparencia."""
+        p = self._arq(
+            '"meu-app@workspace:.":\n'
+            "  version: 0.0.0-use.local\n"
+            '  resolution: "meu-app@workspace:."\n')
+        self.assertEqual(R.parse_yarn_lock(p), [("npm", "meu-app", "")])
+
+    def test_patch_do_berry_nao_gera_falso_sem_versao(self):
+        """O Berry lista o pacote com patch DUAS vezes. Guardar a linha vazia
+        junto da versionada poe o typescript no aviso de "nao checadas" mesmo
+        tendo sido checado -- manda fixar o que ja' esta' fixo."""
+        p = self._arq(
+            '"typescript@npm:^5.5.3":\n'
+            "  version: 5.9.3\n"
+            '  resolution: "typescript@npm:5.9.3"\n\n'
+            '"typescript@patch:typescript@npm%3A^5.5.3#optional!builtin<compat/typescript>":\n'
+            "  version: 5.9.3\n")
+        self.assertEqual(R.parse_yarn_lock(p), [("npm", "typescript", "5.9.3")])
+
+    def test_pacote_local_sem_par_versionado_permanece(self):
+        """A deduplicacao tira so' a linha vazia que TEM par. Sem par, ela e' a
+        verdade: esse pacote nao foi checado, e calar seria o erro oposto."""
+        p = self._arq('"meu-pkg@file:../meu":\n  version "0.0.0"\n')
+        self.assertEqual(R.parse_yarn_lock(p), [("npm", "meu-pkg", "")])
+
+
+class TestManifestosNovos(unittest.TestCase):
+    def test_shrinkwrap_e_os_locks_novos_sao_reconhecidos(self):
+        """npm-shrinkwrap.json tem o formato do package-lock e PRECEDENCIA
+        sobre ele. Fora da tabela, o projeto era lido como se nao tivesse
+        lock -- o mesmo bug que o upstream corrigiu."""
+        for nome in ("npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"):
+            self.assertIn(nome, R.SCA_MANIFESTS, nome)
+            self.assertTrue(R._e_manifesto(nome), nome)
+
+    def test_manifesto_vazio_e_denunciado_nao_engolido(self):
+        """Um lock que existe e nao rende linha nenhuma e' o silencio que esta
+        checagem existe para acabar: sem aviso, o relatorio diz "0 dependencias
+        verificadas" como se o projeto nao tivesse dependencia."""
+        d = Path(tempfile.mkdtemp())
+        (d / "yarn.lock").write_text("# yarn lockfile v1\n", encoding="utf-8")
+        sca = R.run_sca([d])
+        # Caminho INTEIRO, nao so' o nome: num monorepo ha' varios `yarn.lock`,
+        # e "nenhuma dependencia extraida de yarn.lock" nao diz de qual.
+        vazios = sca.get("vazios", [])
+        self.assertEqual(len(vazios), 1, vazios)
+        self.assertTrue(vazios[0].endswith("yarn.lock"), vazios)
+        self.assertEqual(sca.get("deps"), 0)
+
+    def test_relatorio_nomeia_o_manifesto_vazio(self):
+        """O aviso tem de SAIR: guardar a lista e nao imprimir e' o mesmo
+        silencio, so' que mais dificil de notar."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            R.render_sca({"sources": [], "deps": 0, "vulns": {},
+                          "vazios": ["C:/proj/yarn.lock"]})
+        saida = buf.getvalue()
+        self.assertIn("C:/proj/yarn.lock", saida)
+        self.assertIn("nenhuma dependência extraída", saida)
