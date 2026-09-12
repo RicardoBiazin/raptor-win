@@ -120,6 +120,12 @@ TOOLING_RE = re.compile(
     r"|fixtures?|e2e|benchmarks?|migrations?|testdata|test[_-]data)([\\/]|$)"
     # scripts/tests/migrations do supabase/ — MENOS as Edge Functions, que são runtime
     r"|(^|[\\/])supabase[\\/](?!functions[\\/])"
+    # `.claude/` e' configuracao e automacao do ambiente de quem desenvolve:
+    # hook, comando, agente. Nao entra em build nem em deploy e nao recebe
+    # entrada de usuario -- mas sem esta linha os hooks entravam na conta como
+    # se fossem codigo de aplicacao. Medido no Sunset, onde 5 achados HIGH de
+    # `guarda-publicar.mjs` (um hook local) apareciam fora de tooling/test.
+    r"|(^|[\\/])\.claude[\\/]"
     # prefixo de arquivo de teste: test_foo.py, teste_foo.py, spec-foo.js
     r"|(^|[\\/])(test|teste|spec|pentest)[_-]"
     # sufixo de arquivo de teste: foo_test.py, foo_teste.py, foo-spec.js
@@ -565,6 +571,34 @@ def parse_requirements(path: Path) -> list[tuple[str, str, str]]:
     return deps
 
 
+def diretas_do_package_lock(path: Path) -> set[str]:
+    """Nomes que o package.json declara -- as dependencias DIRETAS.
+
+    Existe para o typosquat, e a razao e' o modelo do ataque: typosquat pega
+    quem DIGITA o nome errado num `npm install`. Isso cai como dependencia
+    direta, sempre. Numa transitiva o nome foi escolhido pelo mantenedor de um
+    pacote legitimo, nao por um dedo escorregando no teclado -- e a arvore
+    transitiva de um projeto moderno tem centenas de nomes tecnicos curtos que
+    ficam a uma edicao de alguma coisa.
+
+    Medido nos quatro projetos: 25 achados sobre a arvore inteira, 6 sobre as
+    diretas, e os 19 que sumiram eram todos transitiva do ecossistema do
+    vitest. Nenhum deles era typosquat.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return set()
+    raiz = (data.get("packages") or {}).get("", {})
+    nomes: set[str] = set()
+    for bloco in ("dependencies", "devDependencies", "optionalDependencies",
+                  "peerDependencies"):
+        nomes |= set((raiz.get(bloco) or {}))
+    # v1 nao tem o bloco raiz; ali nao da' para separar direta de transitiva,
+    # entao o conjunto vazio faz o chamador cair no comportamento antigo.
+    return nomes
+
+
 def parse_package_lock(path: Path) -> list[tuple[str, str, str]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
@@ -574,8 +608,16 @@ def parse_package_lock(path: Path) -> list[tuple[str, str, str]]:
     pkgs = data.get("packages")
     if isinstance(pkgs, dict):  # lockfile v2/v3
         for k, v in pkgs.items():
+            v = v or {}
+            # Chave SEM `node_modules/` e' pacote do proprio repositorio (raiz
+            # ou workspace), nao dependencia baixada. Trata-la como pacote npm
+            # produz achado sobre o codigo da casa: medido no omnichannel, onde
+            # o workspace `web@0.1.0` era acusado de typosquat de `web3`.
+            # `link: true` e' o ponteiro para esse mesmo workspace.
+            if "node_modules/" not in k or v.get("link"):
+                continue
             name = k.split("node_modules/")[-1]
-            ver = (v or {}).get("version")
+            ver = v.get("version")
             if name and ver:
                 out.add(("npm", name, ver))
     else:  # v1: dependencies recursivo
@@ -974,6 +1016,7 @@ def run_sca(targets: list[Path]) -> "dict | None":
     dep_paths: dict[tuple[str, str, str], str] = {}
     sources: list[str] = []
     vazios: list[str] = []
+    diretas_npm: set[str] = set()
     for m in manifests:
         # Despacho por nome EXATO quebrava nas variantes que a descoberta passou
         # a aceitar (`requirements-nuvem.txt` levantava KeyError e derrubava a
@@ -985,6 +1028,8 @@ def run_sca(targets: list[Path]) -> "dict | None":
             parser = parse_gha_workflow
         if parser is None:
             continue
+        if m.name in ("package-lock.json", "npm-shrinkwrap.json"):
+            diretas_npm |= diretas_do_package_lock(m)
         got = parser(m)
         if got:
             deps += got
@@ -1089,7 +1134,15 @@ def run_sca(targets: list[Path]) -> "dict | None":
     # do OSV: pacote malicioso publicado ha' minutos nao tem CVE nenhum, e
     # portanto passa limpo pela checagem de vulnerabilidade -- o unico sinal
     # disponivel e' o nome ser quase o de um pacote popular.
-    squat = typosquat.escanear(deps)
+    # Ver `diretas_do_package_lock`: typosquat e' erro de digitacao, e erro de
+    # digitacao cai em dependencia direta. Sem o conjunto (lockfile v1, que nao
+    # tem bloco raiz) mantem o comportamento antigo, que e' checar tudo.
+    if diretas_npm:
+        alvo_squat = [d for d in deps
+                      if d[0] != "npm" or d[1] in diretas_npm]
+    else:
+        alvo_squat = deps
+    squat = typosquat.escanear(alvo_squat)
     for a in squat:
         findings.append({
             "rule": "typosquat",

@@ -76,9 +76,26 @@ def _char_mask(nome: str) -> int:
 
 
 def _popular(eco: str) -> list[str]:
+    """Lista de populares do ecossistema, unida ao suplemento local.
+
+    O arquivo `<eco>.json` vem do upstream e e' um ranking por DEPENDENTES.
+    Essa metrica tem um ponto cego estrutural: ferramenta de build e'
+    devDependency de aplicacao, e aplicacao nao e' dependencia de ninguem.
+    Resultado medido em 12/09/2026: `vite`, `vitest` e `zod` ficam FORA dos
+    5000 enquanto `react`, `lodash` e `express` estao dentro -- e todo projeto
+    Vite/Vitest recebia achado de typosquat sobre as PROPRIAS ferramentas.
+
+    `<eco>-extra.json` corrige isso e fica em arquivo separado de proposito:
+    assim a sincronizacao com o upstream sobrescreve o ranking sem levar o
+    suplemento junto.
+    """
     if eco not in _POPULAR:
         dados = _ler_json(_DATA / "popular" / f"{eco}.json")
-        _POPULAR[eco] = [n.lower() for n in dados] if isinstance(dados, list) else []
+        nomes = [n.lower() for n in dados] if isinstance(dados, list) else []
+        extra = _ler_json(_DATA / "popular" / f"{eco}-extra.json")
+        if isinstance(extra, dict):
+            nomes += [str(n).lower() for n in (extra.get(eco) or [])]
+        _POPULAR[eco] = nomes
     return _POPULAR[eco]
 
 

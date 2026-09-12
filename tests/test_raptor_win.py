@@ -2192,3 +2192,136 @@ Deno.serve(async (req) => {
 })
 """, ".ts")
         self.assertEqual(achados, set())
+
+
+# ---------------------------------------------------------------------------
+# Precisao do typosquat e da classificacao de contexto
+# ---------------------------------------------------------------------------
+
+class TestWorkspaceNaoEPacote(unittest.TestCase):
+    def _lock(self, pacotes: dict) -> Path:
+        d = Path(tempfile.mkdtemp())
+        (d / "package-lock.json").write_text(
+            json.dumps({"lockfileVersion": 3, "packages": pacotes}), encoding="utf-8")
+        return d / "package-lock.json"
+
+    def test_entrada_de_workspace_fica_de_fora(self):
+        """Chave SEM `node_modules/` e' pacote do proprio repositorio, nao
+        dependencia baixada. Medido no omnichannel: o workspace `web@0.1.0`
+        era acusado de typosquat de `web3` -- a ferramenta apontando o codigo
+        da casa como pacote suspeito do registro."""
+        p = self._lock({
+            "": {"name": "app"},
+            "web": {"version": "0.1.0"},
+            "packages/core": {"version": "0.1.0"},
+            "node_modules/lodash": {"version": "4.17.21",
+                                    "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"},
+        })
+        self.assertEqual(raptor_win.parse_package_lock(p),
+                         [("npm", "lodash", "4.17.21")])
+
+    def test_link_para_workspace_fica_de_fora(self):
+        """`link: true` e' ponteiro para o workspace que ja' foi descartado."""
+        p = self._lock({
+            "": {"name": "app"},
+            "node_modules/@app/core": {"resolved": "packages/core", "link": True},
+            "node_modules/lodash": {"version": "4.17.21"},
+        })
+        self.assertEqual(raptor_win.parse_package_lock(p),
+                         [("npm", "lodash", "4.17.21")])
+
+
+class TestTyposquatSoNasDiretas(unittest.TestCase):
+    def _proj(self, diretas: dict, todas: dict) -> Path:
+        d = Path(tempfile.mkdtemp())
+        pacotes = {"": {"name": "app", "dependencies": diretas}}
+        for nome, ver in todas.items():
+            pacotes["node_modules/" + nome] = {
+                "version": ver,
+                "resolved": f"https://registry.npmjs.org/{nome}/-/{nome}-{ver}.tgz"}
+        (d / "package-lock.json").write_text(
+            json.dumps({"lockfileVersion": 3, "packages": pacotes}), encoding="utf-8")
+        return d
+
+    def test_diretas_do_package_lock(self):
+        d = self._proj({"lodash": "^4"}, {"lodash": "4.17.21", "reakt": "1.0.0"})
+        self.assertEqual(
+            raptor_win.diretas_do_package_lock(d / "package-lock.json"), {"lodash"})
+
+    def test_transitiva_nao_e_checada(self):
+        """O modelo do ataque decide isto: typosquat pega quem DIGITA errado
+        num `npm install`, e isso cai como dependencia DIRETA. Numa transitiva
+        o nome foi escolhido pelo mantenedor de um pacote legitimo.
+
+        Medido nos quatro projetos: 25 achados sobre a arvore inteira, 6 sobre
+        as diretas, e os 19 que sumiram eram transitivas do ecossistema do
+        vitest -- nenhuma delas typosquat.
+        """
+        # O mock DEVOLVE resposta vazia em vez de lancar: com excecao, o
+        # `run_sca` sai pelo caminho de erro ANTES do typosquat, e o teste
+        # passaria sem ter exercitado nada.
+        with mock.patch.object(raptor_win, "_consulta_gha", return_value=({}, {}, [])), \
+             mock.patch.object(raptor_win.urllib.request, "urlopen",
+                               return_value=FakeResponse({"results": []})):
+            d = self._proj({"lodash": "^4"}, {"lodash": "4.17.21", "reakt": "1.0.0"})
+            sca = raptor_win.run_sca([d])
+        nomes = {a["name"] for a in sca.get("typosquat", [])}
+        self.assertNotIn("reakt", nomes, "transitiva não devia ser checada")
+
+    def test_direta_suspeita_continua_sendo_acusada(self):
+        """A contrapartida: restringir a diretas nao pode calar o caso real."""
+        with mock.patch.object(raptor_win, "_consulta_gha", return_value=({}, {}, [])), \
+             mock.patch.object(raptor_win.urllib.request, "urlopen",
+                               return_value=FakeResponse({"results": []})):
+            d = self._proj({"reakt": "^1"}, {"reakt": "1.0.0"})
+            sca = raptor_win.run_sca([d])
+        self.assertIn("reakt", {a["name"] for a in sca.get("typosquat", [])})
+
+    def test_lockfile_v1_mantem_o_comportamento_antigo(self):
+        """v1 nao tem bloco raiz, entao nao da' para separar direta de
+        transitiva. Sem o conjunto, checa tudo -- degradar para 'nao checa
+        nada' seria trocar ruido por cegueira."""
+        d = Path(tempfile.mkdtemp())
+        (d / "package-lock.json").write_text(json.dumps(
+            {"lockfileVersion": 1, "dependencies": {"reakt": {"version": "1.0.0"}}}),
+            encoding="utf-8")
+        self.assertEqual(
+            raptor_win.diretas_do_package_lock(d / "package-lock.json"), set())
+
+
+class TestSuplementoDePopulares(unittest.TestCase):
+    def test_ferramenta_de_build_e_reconhecida_como_popular(self):
+        """O ranking do upstream e' por DEPENDENTES, e essa metrica subconta
+        ferramenta de build: ela e' devDependency de aplicacao, e aplicacao nao
+        e' dependencia de ninguem. Medido: `vite`, `vitest` e `zod` ficam fora
+        dos 5000 enquanto `react` e `express` estao dentro -- e todo projeto
+        Vite recebia achado sobre as proprias ferramentas."""
+        pop = set(typosquat._popular("npm"))
+        for n in ("vite", "vitest", "zod", "deno", "pathe", "fdir"):
+            self.assertIn(n, pop, n)
+        self.assertIn("react", pop, "o ranking do upstream tem de continuar valendo")
+
+    def test_suplemento_nao_cala_typosquat_de_verdade(self):
+        nomes = {a["name"] for a in typosquat.escanear([
+            ("npm", "loadash", "1.0"), ("npm", "reakt", "1.0"),
+            ("npm", "@mau/lodash", "1.0"), ("npm", "vite", "8.2.1")])}
+        self.assertEqual(nomes, {"loadash", "reakt", "@mau/lodash"})
+
+
+class TestClaudeEFerramenta(unittest.TestCase):
+    def test_hooks_do_claude_sao_tooling(self):
+        """`.claude/` e' automacao do ambiente de quem desenvolve: nao entra em
+        build nem em deploy e nao recebe entrada de usuario. Medido no Sunset,
+        onde 5 achados HIGH de um hook local entravam na conta como se fossem
+        codigo de aplicacao."""
+        barra = chr(92)
+        for p in (".claude/hooks/guarda-publicar.mjs",
+                  "C:" + barra + "DEV" + barra + "Sunset" + barra + ".claude"
+                  + barra + "hooks" + barra + "x.mjs"):
+            self.assertEqual(raptor_win.classify_context(p, "x"), "tooling/test", p)
+
+    def test_nao_engole_nome_parecido(self):
+        """`.claudex/` nao e' `.claude/`. Uma classificacao larga demais aqui
+        silencia codigo de aplicacao."""
+        self.assertEqual(raptor_win.classify_context("src/.claudex/a.ts", "x"), "")
+        self.assertEqual(raptor_win.classify_context("src/lib/app.ts", "x"), "")
