@@ -210,6 +210,67 @@ def _arquivos(alvos: list[Path], skip_dirs: set[str]) -> list[Path]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Segredo atras de um prefixo que o bundler PUBLICA
+# ---------------------------------------------------------------------------
+
+# Vite e Next.js decidem o que vai para o navegador pelo PREFIXO do nome. Tudo
+# que comeca com estes vai para dentro do bundle, em texto puro, servido a
+# qualquer visitante. Nao ha' erro, nao ha' aviso: o prefixo E' a permissao.
+PREFIXOS_PUBLICOS = ("VITE_", "NEXT_PUBLIC_", "REACT_APP_", "PUBLIC_",
+                     "NUXT_PUBLIC_", "GATSBY_", "EXPO_PUBLIC_")
+
+# Palavras que, no nome da variavel, dizem que aquilo NAO devia ser publicado.
+# Casar pelo nome e' de proposito: o valor pode estar num painel, num secret do
+# CI ou vazio no repositorio -- o erro ja' esta' no nome, porque o nome e' o
+# que manda o bundler embutir.
+_PALAVRAS_SECRETAS = ("SERVICE_ROLE", "SERVICE_KEY", "SECRET", "PRIVATE",
+                      "PASSWORD", "SENHA", "CREDENTIAL", "ACCESS_TOKEN",
+                      "REFRESH_TOKEN", "CLIENT_SECRET", "API_SECRET",
+                      "WEBHOOK_SECRET", "SIGNING")
+
+_PREFIXO_RE = re.compile(
+    r"^\s*(?:export\s+)?((?:%s)[A-Z0-9_]*)\s*=" % "|".join(PREFIXOS_PUBLICOS),
+    re.M)
+
+
+def _achados_prefixo_publico(texto: str, rel: str) -> list[dict]:
+    """Variavel de prefixo publico cujo NOME anuncia um segredo.
+
+    A `service_role` do Supabase e' o caso extremo e o mais facil de cometer:
+    ela ignora RLS por definicao -- e' a chave de administrador do banco. Sob um
+    prefixo publico, ela nao vaza por descuido de alguem: ela e' COMPILADA no
+    JavaScript que todo visitante baixa. Quem abrir o DevTools tem leitura e
+    escrita em todas as tabelas.
+
+    Note a assimetria com o resto deste modulo: aqui nao importa se ha' valor.
+    Um `VITE_SUPABASE_SERVICE_ROLE_KEY=` vazio no repositorio ainda esta'
+    errado, porque o painel da Netlify preenche esse nome no build e o prefixo
+    manda embutir.
+    """
+    achados = []
+    for m in _PREFIXO_RE.finditer(texto):
+        nome = m.group(1)
+        if not any(p in nome for p in _PALAVRAS_SECRETAS):
+            continue
+        achados.append({
+            "rule": "secrets.prefixo-publico-com-segredo",
+            "severity": "CRITICAL",
+            "path": rel,
+            "line": _linha_de(texto, m.start()),
+            "message": (
+                f"`{nome}` usa prefixo que o bundler PUBLICA, e o nome anuncia "
+                f"um segredo. Vite e Next decidem pelo prefixo o que entra no "
+                f"bundle: esta variavel vai em texto puro para o navegador de "
+                f"todo visitante. Se for a `service_role` do Supabase, ela "
+                f"ignora RLS por definicao -- quem abrir o DevTools passa a ter "
+                f"leitura e escrita em todas as tabelas. Tire o prefixo e "
+                f"consuma a chave dentro de uma Netlify Function, via "
+                f"`process.env`."),
+        })
+    return achados
+
+
 def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
     """Devolve achados no mesmo formato de `collect()`, para fluírem pelo
     console, Markdown, SARIF e --fail-on sem tratamento especial."""
@@ -225,6 +286,14 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
         rel_norm = rel.replace("\\", "/")
 
         modelo = bool(MODELO_RE.search(rel_norm))
+
+        # Prefixo publico com nome de segredo. Vale ate' em arquivo MODELO: um
+        # `.env.example` com `VITE_..._SERVICE_ROLE_KEY=` nao vazou chave
+        # nenhuma, mas ensina o nome errado -- e' o molde que alguem vai
+        # preencher no painel da Netlify.
+        texto_pref = _ler(arq)
+        if texto_pref is not None:
+            achados += _achados_prefixo_publico(texto_pref, rel_norm)
 
         # Arquivo de ambiente versionado, mas sem nenhum valor que pareça
         # credencial: o aviso continua (preventivo), com severidade honesta.

@@ -13,6 +13,8 @@ from unittest import mock
 import db_audit
 import headers_lint
 import raptor_win
+import secrets_scan
+import sql_lint
 import raptor_win as R
 import typosquat
 
@@ -1840,5 +1842,154 @@ const a = DOMPurify.sanitize(x)
 const b = DOMPurify.sanitize(x, { ALLOWED_TAGS: ['b', 'i'], ADD_ATTR: ['target'] })
 const c = DOMPurify.sanitize(x, { SAFE_FOR_XML: true, RETURN_TRUSTED_TYPE: true })
 DOMPurify.addHook('afterSanitizeAttributes', function (node) { node.setAttribute('rel', 'noopener') })
+""", ".ts")
+        self.assertEqual(achados, set())
+
+
+# ---------------------------------------------------------------------------
+# Diretrizes do manual de seguranca do projeto (RLS, prefixo publico, edge)
+# ---------------------------------------------------------------------------
+
+class TestTabelaSemRLS(unittest.TestCase):
+    def _rodar(self, arquivos: dict) -> list:
+        d = Path(tempfile.mkdtemp())
+        for nome, sql in arquivos.items():
+            (d / nome).write_text(sql, encoding="utf-8")
+        return [a for a in sql_lint.escanear([d], raptor_win.SKIP_DIRS)
+                if a["rule"] == "sql.supabase.tabela-sem-rls"]
+
+    def _acusadas(self, arquivos: dict) -> set:
+        return {a["message"].split("`")[1] for a in self._rodar(arquivos)}
+
+    def test_tabela_sem_rls_e_acusada(self):
+        """No Supabase nao e' descuido de configuracao, e' exposicao: o
+        PostgREST publica a tabela e a anon key -- publica por design -- le'."""
+        self.assertEqual(
+            self._acusadas({"01.sql": "create table public.clientes (id uuid);"}),
+            {"public.clientes"})
+
+    def test_rls_estatico_silencia(self):
+        self.assertEqual(self._acusadas({"01.sql":
+            "create table public.pedidos (id uuid);\n"
+            "alter table public.pedidos enable row level security;\n"}), set())
+
+    def test_rls_por_laco_dinamico_silencia(self):
+        """A regressao que definiu esta checagem. Uma migracao que trata N
+        tabelas iguais usa `execute format('alter table %I enable row level
+        security', t)` sobre um array -- e o nome da tabela nao esta' no
+        comando, esta' no array.
+
+        Medido no omnichannel: 21 de 21 tabelas cobertas assim, e a versao
+        ingenua acusava 13, todas falsas. Regra que erra 13 de 13 num projeto
+        correto nao e' usada duas vezes.
+        """
+        self.assertEqual(self._acusadas({"01.sql": """
+do $$
+declare t text;
+  tabelas text[] := array['itens', 'entregas'];
+begin
+  foreach t in array tabelas loop
+    execute format('alter table public.%I enable row level security', t);
+  end loop;
+end $$;
+create table public.itens (id uuid);
+create table public.entregas (id uuid);
+"""}), set())
+
+    def test_schema_interno_nao_e_cobrado(self):
+        """`auth`, `storage` e afins sao do proprio Supabase: nao entram na API
+        automatica, e RLS ali nao e' decisao do projeto."""
+        self.assertEqual(
+            self._acusadas({"01.sql": "create table auth.sessions (id uuid);"}),
+            set())
+
+    def test_decide_entre_arquivos(self):
+        """A tabela nasce numa migracao e e' fechada em outra, as vezes meses
+        depois. Julgar arquivo a arquivo acusaria toda tabela do projeto."""
+        self.assertEqual(self._acusadas({
+            "01_cria.sql": "create table public.notas (id uuid);",
+            "02_rls.sql": "alter table public.notas enable row level security;",
+        }), set())
+
+
+class TestPrefixoPublicoComSegredo(unittest.TestCase):
+    def _rodar(self, conteudo: str) -> list:
+        d = Path(tempfile.mkdtemp())
+        (d / ".env.example").write_text(conteudo, encoding="utf-8")
+        return [a for a in secrets_scan.escanear([d], raptor_win.SKIP_DIRS)
+                if a["rule"] == "secrets.prefixo-publico-com-segredo"]
+
+    def _nomes(self, conteudo: str) -> set:
+        return {a["message"].split("`")[1] for a in self._rodar(conteudo)}
+
+    def test_service_role_sob_prefixo_publico(self):
+        self.assertEqual(self._nomes("VITE_SUPABASE_SERVICE_ROLE_KEY=ey.x\n"),
+                         {"VITE_SUPABASE_SERVICE_ROLE_KEY"})
+
+    def test_valor_vazio_ainda_e_erro(self):
+        """Assimetria deliberada com o resto do modulo: aqui nao importa se ha'
+        valor. O nome ja' e' o erro, porque e' o PREFIXO que manda o bundler
+        embutir -- e o painel da Netlify preenche esse nome no build."""
+        self.assertEqual(self._nomes("VITE_SUPABASE_SERVICE_ROLE_KEY=\n"),
+                         {"VITE_SUPABASE_SERVICE_ROLE_KEY"})
+
+    def test_anon_key_nao_e_acusada(self):
+        """A anon key vai para o bundle POR DESIGN -- e' o par da RLS. Acusa-la
+        seria acusar o funcionamento normal do Supabase."""
+        self.assertEqual(self._nomes(
+            "VITE_SUPABASE_URL=https://x.supabase.co\n"
+            "VITE_SUPABASE_ANON_KEY=ey.abc\n"
+            "VITE_MARCA=PDV\n"), set())
+
+    def test_sem_prefixo_publico_nao_e_acusada(self):
+        """`SUPABASE_SERVICE_ROLE_KEY` sem prefixo NAO entra no bundle: e' o
+        jeito certo, e e' o que a funcao serverless consome."""
+        self.assertEqual(self._nomes("SUPABASE_SERVICE_ROLE_KEY=ey.real\n"), set())
+
+    def test_outros_bundlers(self):
+        for nome in ("NEXT_PUBLIC_STRIPE_SECRET", "REACT_APP_API_SECRET",
+                     "EXPO_PUBLIC_CLIENT_SECRET"):
+            self.assertEqual(self._nomes(nome + "=x\n"), {nome}, nome)
+
+
+class TestRegraEdgeServiceRole(_BaseRegras):
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "supabase"
+    ARQ = "edge-service-role-sem-autorizacao.yaml"
+
+    def test_handler_sem_parametro_com_service_role(self):
+        """O handler sem parametro nao RECEBE a requisicao: nao e' que a
+        autorizacao esteja fraca, e' que ela e' impossivel de escrever."""
+        achados = self._rodar(self.ARQ, """
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+Deno.serve(async () => {
+  const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+  const { data } = await db.from('contatos').select('*')
+  return new Response(JSON.stringify(data))
+})
+""", ".ts")
+        self.assertIn("edge-service-role-sem-autorizacao", achados)
+
+    def test_handler_que_recebe_req_e_valida_nao_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+Deno.serve(async (req) => {
+  const token = req.headers.get('Authorization')
+  const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+  const { data: user } = await db.auth.getUser(token)
+  if (!user) return new Response('nao autorizado', { status: 401 })
+  return new Response('ok')
+})
+""", ".ts")
+        self.assertEqual(achados, set())
+
+    def test_sem_service_role_nao_e_acusado(self):
+        """Handler sem parametro que usa a anon key continua sob RLS: o banco
+        ainda decide o que ele enxerga."""
+        achados = self._rodar(self.ARQ, """
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+Deno.serve(async () => {
+  const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!)
+  return new Response('ok')
+})
 """, ".ts")
         self.assertEqual(achados, set())

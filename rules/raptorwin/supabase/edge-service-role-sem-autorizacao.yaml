@@ -1,0 +1,48 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Edge Function que usa a service_role e NAO olha a requisicao.
+  #
+  # NAO e' regra do RAPTOR. Escrita a partir de codigo real: tres funcoes de um
+  # projeto proprio abrem `Deno.serve(async () => {...})` -- handler SEM
+  # PARAMETRO -- e montam o cliente com `SUPABASE_SERVICE_ROLE_KEY` dentro.
+  #
+  # O handler sem parametro e' o ponto: ele nao recebe a requisicao, entao nao
+  # pode inspecionar cabecalho, nem token, nem origem. Nao e' que a autorizacao
+  # esteja fraca -- ela e' impossivel de escrever. E o corpo roda com a
+  # service_role, que ignora RLS por definicao: e' a chave de administrador do
+  # banco.
+  #
+  # Sem `verify_jwt = false` isso ainda passa pelo gateway do Supabase, mas o
+  # gateway aceita QUALQUER JWT valido -- inclusive a anon key, que esta' no
+  # bundle de todo visitante por design. Gateway e' camada, nao autorizacao.
+  #
+  # O caso legitimo e' a funcao de cron. A diferenca esta' na intencao
+  # declarada, nao no codigo: por isso a mensagem pede a trava explicita (uma
+  # chave compartilhada no cabecalho, conferida no inicio do handler) em vez de
+  # mandar "adicione autenticacao".
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.supabase.edge-service-role-sem-autorizacao
+    message: >-
+      Edge Function que roda com `service_role` e nao recebe a requisicao: o
+      handler nao tem parametro, entao nao ha' onde conferir quem chamou. O
+      corpo ignora RLS (e' o que a service_role faz), e o gateway do Supabase
+      aceita qualquer JWT valido -- a anon key inclusive, que vai no bundle de
+      todo visitante. Se e' funcao agendada, receba `req` e confira uma chave
+      compartilhada num cabecalho proprio antes de tocar no banco; se e'
+      chamada por usuario, valide o JWT dele com `auth.getUser()` e use a chave
+      `anon` para que a RLS continue valendo.
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: Deno.serve(async () => {...})
+          - pattern: Deno.serve(() => {...})
+          - pattern: serve(async () => {...})
+          - pattern: serve(() => {...})
+      # A service_role tem de estar DENTRO do handler: e' o que separa "roda
+      # com privilegio de administrador" de uma funcao qualquer sem parametro.
+      - pattern-regex: "SERVICE_ROLE"
+    metadata:
+      cwe: ["CWE-306: Missing Authentication for Critical Function"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      tags: ["security", "supabase", "edge-functions", "service-role", "authz"]

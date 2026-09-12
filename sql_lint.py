@@ -759,6 +759,105 @@ def _achados_execute_nunca_fechado(definidas: dict, mencionados: set,
     return achados
 
 
+# ---------------------------------------------------------------------------
+# Tabela sem RLS
+# ---------------------------------------------------------------------------
+
+_CREATE_TABLE = re.compile(
+    r"create\s+table\s+(?:if\s+not\s+exists\s+)?([\w\".]+)", re.I)
+_ENABLE_RLS = re.compile(
+    r"alter\s+table\s+(?:if\s+exists\s+)?([\w\".%]+)\s+enable\s+row\s+level\s+security", re.I)
+# Tabelas que o PostgREST nunca expoe: sao do proprio Supabase/Postgres e nao
+# entram na API automatica, entao RLS ali nao e' decisao do projeto.
+_SCHEMAS_INTERNOS = {"auth", "storage", "realtime", "vault", "graphql",
+                     "extensions", "cron", "net", "pgsodium", "supabase_migrations",
+                     "information_schema", "pg_catalog"}
+
+
+def _nome_simples(alvo: str) -> str:
+    return alvo.strip().strip('"').split(".")[-1].lower()
+
+
+def _schema_de(alvo: str) -> str:
+    partes = alvo.strip().replace('"', "").split(".")
+    return partes[0].lower() if len(partes) > 1 else ""
+
+
+def _rls_por_laco(texto: str) -> set:
+    """Tabelas que ganham RLS dentro de um laco dinamico.
+
+    E' o idioma normal de uma migracao que trata N tabelas iguais:
+
+        do $$ declare t text; tabelas text[] := array['conversations', ...];
+        begin foreach t in array tabelas loop
+          execute format('alter table atendimento.%I enable row level security', t);
+
+    Um casamento ingenuo de `alter table <nome> enable row level security` nao
+    ve' nada disso: o nome nao esta' no comando, esta' no array. Medido no
+    omnichannel, que cobre 21 de 21 tabelas e onde a checagem ingenua acusava
+    13 -- todas falsas. Uma regra que erra 13 de 13 num projeto correto nao e'
+    usada duas vezes.
+
+    Então: se um bloco `do $$ ... $$` contem um `enable row level security`,
+    todo literal de string dentro dos `array[...]` desse bloco conta como
+    tabela coberta. E' deliberadamente generoso -- prefiro deixar passar uma
+    tabela de verdade a acusar doze corretas.
+    """
+    cobertas: set = set()
+    for bloco in re.findall(r"\$\$(.*?)\$\$", texto, re.S):
+        if not re.search(r"enable\s+row\s+level\s+security", bloco, re.I):
+            continue
+        for arr in re.findall(r"array\s*\[(.*?)\]", bloco, re.S | re.I):
+            for nome in re.findall(r"'([\w]+)'", arr):
+                cobertas.add(nome.lower())
+    return cobertas
+
+
+def _coletar_rls(texto: str, rel: str, criadas: dict, com_rls: set) -> None:
+    for m in _CREATE_TABLE.finditer(texto):
+        alvo = m.group(1)
+        if _schema_de(alvo) in _SCHEMAS_INTERNOS:
+            continue
+        criadas.setdefault(_nome_simples(alvo),
+                           {"path": rel, "line": _linha(texto, m.start()),
+                            "alvo": alvo.strip().strip('"')})
+    for m in _ENABLE_RLS.finditer(texto):
+        com_rls.add(_nome_simples(m.group(1)))
+    com_rls |= _rls_por_laco(texto)
+
+
+def _achados_sem_rls(criadas: dict, com_rls: set) -> list:
+    """Tabela criada e nunca posta sob RLS.
+
+    No Supabase isto nao e' descuido de configuracao: e' exposicao direta. O
+    PostgREST publica automaticamente toda tabela do schema exposto, e sem RLS
+    a chave `anon` -- que esta' no bundle de qualquer visitante, por design --
+    le' a tabela inteira. Nao ha' senha a descobrir nem endpoint a adivinhar.
+
+    Decidido entre arquivos, como o resto do modulo: a tabela nasce numa
+    migracao e costuma ser fechada em outra.
+    """
+    achados = []
+    for nome, info in sorted(criadas.items()):
+        if nome in com_rls:
+            continue
+        achados.append({
+            "rule": "sql.supabase.tabela-sem-rls",
+            "severity": "HIGH",
+            "context": "",
+            "path": info["path"],
+            "line": info["line"],
+            "message": (
+                f"`{info['alvo']}` e' criada e nunca recebe "
+                f"`enable row level security`. O PostgREST publica toda tabela "
+                f"do schema exposto, entao sem RLS a chave anon -- que esta' no "
+                f"bundle de qualquer visitante, por design -- le' a tabela "
+                f"inteira. Acrescente `alter table {info['alvo']} enable row "
+                f"level security;` e as policies de cada operacao."),
+        })
+    return achados
+
+
 def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
     # Duas fases: índice e policy se resolvem dentro de um arquivo, mas o
     # EXECUTE de uma função se decide entre migrações — o revoke numa, o grant
@@ -770,6 +869,10 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
     # não) fechada em outra, então nada disso se decide num arquivo só.
     definidas: dict[str, dict] = {}
     mencionados: set[str] = set()
+    # RLS tambem se decide ENTRE arquivos: a tabela nasce numa migracao e e'
+    # fechada em outra, as vezes meses depois.
+    criadas: dict[str, dict] = {}
+    com_rls: set = set()
     bloco: list[int] = []
     defaults: list[int] = []
     helpers: set[str] = set()
@@ -795,7 +898,9 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
         _coletar_execute(texto, rel, revogados, concedidos)
         _coletar_funcoes_definer(texto, rel, ordem, funcs, definidas,
                                  mencionados, bloco, defaults, helpers)
+        _coletar_rls(texto, rel, criadas, com_rls)
 
+    achados += _achados_sem_rls(criadas, com_rls)
     achados += _achados_revoke_incompleto(revogados, concedidos)
     achados += _achados_execute_nunca_fechado(definidas, mencionados, bloco,
                                               defaults, helpers)

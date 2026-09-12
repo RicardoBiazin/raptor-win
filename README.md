@@ -31,6 +31,7 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | **Live Postgres/Supabase catalog audit (`--db-audit`), read-only** | Write to your database (four layers stop it) |
 | **Security headers** of the static host (`netlify.toml`, `_headers`, `vercel.json`) | Fetch your live site to check them |
 | **DOM XSS sinks in JS/TS** + DOMPurify misconfiguration | — |
+| **Supabase**: table never put under RLS, Edge Function running as `service_role` without reading the request, secret behind a bundler-public prefix | — |
 | De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
 | Console + Markdown + **SARIF** + raw JSON report | — |
 | Diff mode (`--changed`) + CI exit codes (`--fail-on`) | — |
