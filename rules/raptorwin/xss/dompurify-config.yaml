@@ -1,0 +1,104 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Configuracao do DOMPurify que devolve o que ele existe para tirar.
+  #
+  # NAO sao regras do RAPTOR. Escritas a partir do que o proprio README e o wiki
+  # "Attack Classes & Bypass History" do DOMPurify marcam como perigoso -- em
+  # varios casos com essas palavras.
+  #
+  # Este e' o formato de falha que mais engana numa revisao: existe uma chamada
+  # de `sanitize()` bem ali, o import esta' correto, a dependencia esta' na
+  # versao mais nova. O que desarma a protecao e' o segundo argumento.
+  #
+  # NAO cobre versao vulneravel do proprio dompurify: os CVEs dele estao no OSV,
+  # e o `--sca` ja' os pega por todos os lockfiles npm que a ferramenta le'.
+  # Uma checagem de piso de versao aqui seria a mesma coisa, duas vezes.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.xss.dompurify-config-permissiva
+    message: >-
+      Opcao do DOMPurify que reabre execucao de script. `ALLOW_UNKNOWN_PROTOCOLS`
+      libera `javascript:`; `SAFE_FOR_XML: false` derruba a guarda de
+      breakout em rawtext (a dos CVE-2025-15599 e CVE-2026-0540);
+      `SANITIZE_DOM: false` desliga a protecao contra DOM clobbering;
+      `IN_PLACE: true` sanitiza um no' JA' ligado ao documento -- o que fosse
+      executar, executou antes. O README do DOMPurify marca cada uma delas como
+      risco de XSS. Remova a opcao, ou justifique-a no baseline.
+    languages: [typescript, javascript]
+    severity: ERROR
+    pattern-either:
+      - pattern: "{..., ALLOW_UNKNOWN_PROTOCOLS: true, ...}"
+      - pattern: "{..., SAFE_FOR_XML: false, ...}"
+      - pattern: "{..., SANITIZE_DOM: false, ...}"
+      - pattern: "{..., IN_PLACE: true, ...}"
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "xss", "dompurify", "sanitizer-config"]
+
+  # ---------------------------------------------------------------------------
+  # Tag ou atributo devolvido a` lista de permitidos.
+  #
+  # `ADD_TAGS`/`ADD_ATTR` sao legitimos para casos como `ADD_ATTR: ['target']`.
+  # So' acuso o conteudo que reabre execucao -- senao a regra grita em todo
+  # projeto que personaliza a sanitizacao, e passa a ser ignorada.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.xss.dompurify-add-perigoso
+    message: >-
+      `ADD_TAGS`/`ADD_ATTR` devolvendo elemento ou atributo executavel a` lista
+      de permitidos. `script`, `iframe`, `object` e `embed` executam; um
+      atributo `on*`, `srcdoc` ou `formaction` executa igual. Adicionar
+      qualquer um deles anula a sanitizacao para esse vetor especifico, com a
+      chamada de `sanitize()` continuando la' para enganar quem revisa.
+    languages: [typescript, javascript]
+    severity: ERROR
+    pattern-either:
+      - pattern: "{..., ADD_TAGS: [..., \"script\", ...], ...}"
+      - pattern: "{..., ADD_TAGS: [..., \"iframe\", ...], ...}"
+      - pattern: "{..., ADD_TAGS: [..., \"object\", ...], ...}"
+      - pattern: "{..., ADD_TAGS: [..., \"embed\", ...], ...}"
+      - pattern: "{..., ADD_ATTR: [..., \"srcdoc\", ...], ...}"
+      - pattern: "{..., ADD_ATTR: [..., \"formaction\", ...], ...}"
+      - pattern: "{..., ADD_ATTR: [..., \"onerror\", ...], ...}"
+      - pattern: "{..., ADD_ATTR: [..., \"onload\", ...], ...}"
+      - pattern: "{..., ADD_ATTR: [..., \"onclick\", ...], ...}"
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "xss", "dompurify", "sanitizer-config"]
+
+  # ---------------------------------------------------------------------------
+  # Hook que desfaz a sanitizacao depois dela.
+  #
+  # Os hooks do DOMPurify sao GLOBAIS: um modulo qualquer registra um
+  # `afterSanitizeAttributes` que devolve um atributo, e toda chamada de
+  # `sanitize()` do aplicativo passa a carregar isso -- inclusive as escritas
+  # por quem nunca viu esse arquivo.
+  #
+  # O caso legitimo e' `setAttribute('rel', 'noopener')`, que ENDURECE. Por isso
+  # so' acuso o que devolve superficie de execucao.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.xss.dompurify-hook-que-desfaz
+    message: >-
+      Hook `afterSanitize*` devolvendo atributo executavel ao no' ja' limpo. O
+      hook roda DEPOIS da sanitizacao, entao o que ele repoe nao passa por
+      filtro nenhum -- e hooks do DOMPurify sao globais, valendo para toda
+      chamada de `sanitize()` do aplicativo.
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-inside: |
+          DOMPurify.addHook($NOME, function(...) { ... })
+      - metavariable-regex:
+          metavariable: $NOME
+          regex: '^["'']?(afterSanitizeAttributes|afterSanitizeElements|afterSanitizeShadowDOM)["'']?$'
+      - pattern-either:
+          - pattern: $NODE.setAttribute("srcdoc", ...)
+          - pattern: $NODE.setAttribute("formaction", ...)
+          - pattern: $NODE.setAttribute($A, ...)
+      - metavariable-regex:
+          metavariable: $A
+          regex: '^["'']?on[a-z]+["'']?$'
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "xss", "dompurify", "hooks"]

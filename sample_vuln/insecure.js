@@ -14,3 +14,10 @@ async function enviarPush(sub) {
 }
 
 module.exports = { app, enviarPush }
+
+// XSS: sanitiza e DEPOIS concatena — anula a sanitização. O DOMPurify garante
+// a árvore que ELE produziu, não a string montada depois dela.
+import DOMPurify from 'dompurify'
+export function montar(el, sujo, rodape) {
+  el.innerHTML = DOMPurify.sanitize(sujo) + rodape
+}

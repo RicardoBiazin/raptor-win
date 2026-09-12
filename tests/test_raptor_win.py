@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1683,3 +1685,160 @@ class TestSkipDirsDeploy(unittest.TestCase):
         editar um arquivo que o proximo deploy sobrescreve."""
         self.assertIn(".netlify", raptor_win.SKIP_DIRS)
         self.assertIn(".vercel", raptor_win.SKIP_DIRS)
+
+
+# ---------------------------------------------------------------------------
+# Regras de XSS no DOM (rules/raptorwin/xss/)
+# ---------------------------------------------------------------------------
+
+class _BaseRegras(unittest.TestCase):
+    """Roda o Semgrep de verdade contra um arquivo de mentira.
+
+    Testar regra Semgrep por leitura do YAML nao prova nada: o que quebra na
+    pratica e' o PARSE do padrao. Duas das regras aqui nasceram quebradas e
+    passariam num teste que so' conferisse o texto -- um atributo JSX solto nao
+    e' JS valido, e o `metavariable-regex` casa contra o texto do no', aspas
+    incluidas, entao prever so' aspas duplas fazia a regra nunca disparar.
+    """
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "xss"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.semgrep = raptor_win.find_semgrep()
+        if not cls.semgrep:
+            raise unittest.SkipTest("semgrep não encontrado")
+
+    def _rodar(self, yaml_rel: str, conteudo: str, sufixo: str) -> set:
+        d = Path(tempfile.mkdtemp())
+        alvo = d / ("amostra" + sufixo)
+        alvo.write_text(conteudo, encoding="utf-8")
+        # `semgrep.exe` delega a `pysemgrep`, invocando-o pelo NOME PURO. Se a
+        # pasta de Scripts do pip não está no PATH -- o padrão no Windows --, o
+        # filho morre com "No such file or directory" e a saída vem VAZIA, que
+        # este teste leria como "nenhum achado". Mesma correção que
+        # `run_semgrep` já faz: pôr no PATH a pasta de onde o semgrep veio.
+        env = os.environ.copy()
+        pasta = str(Path(self.semgrep).parent)
+        if pasta not in env.get("PATH", "").split(os.pathsep):
+            env["PATH"] = pasta + os.pathsep + env.get("PATH", "")
+        saida = subprocess.run(
+            [self.semgrep, "--config", str(self.REGRAS / yaml_rel), "--json",
+             "--metrics=off", "--quiet", str(d)],
+            capture_output=True, text=True, timeout=180, env=env)
+        self.assertTrue(saida.stdout.strip(),
+                        f"semgrep não produziu saída: {saida.stderr[:300]}")
+        dados = json.loads(saida.stdout)
+        # Regra que nao compila vem como erro, NAO como zero achados. Sem esta
+        # assercao, "nenhum achado" e "a regra esta' quebrada" ficam iguais.
+        erros = [e for e in dados.get("errors", [])
+                 if "parse" in str(e.get("message", "")).lower()]
+        self.assertEqual(erros, [], f"regra não compila: {erros}")
+        return {r["check_id"].rsplit(".", 1)[-1] for r in dados.get("results", [])}
+
+
+class TestRegrasSinkDom(_BaseRegras):
+    ARQ = "dom-sinks.yaml"
+
+    def test_sink_com_valor_dinamico_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+export function f(el, sujo, w) {
+  el.innerHTML = sujo
+  el.insertAdjacentHTML('beforeend', sujo)
+  w.document.write(`<h1>${sujo}</h1>`)
+}
+""", ".ts")
+        self.assertIn("dom-html-sink", achados)
+
+    def test_literal_e_limpeza_nao_sao_acusados(self):
+        """`innerHTML = ''` para limpar um no' e string constante sao o uso
+        comum e correto. Acusa-los poria a regra no ruido."""
+        achados = self._rodar(self.ARQ, """
+export function f(el) {
+  el.innerHTML = ''
+  el.innerHTML = '<b>fixo</b>'
+  el.textContent = 'qualquer coisa'
+}
+""", ".ts")
+        self.assertNotIn("dom-html-sink", achados)
+
+    def test_sink_ja_sanitizado_nao_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+import DOMPurify from 'dompurify'
+export function f(el, sujo) {
+  el.innerHTML = DOMPurify.sanitize(sujo)
+  el.insertAdjacentHTML('beforeend', DOMPurify.sanitize(sujo))
+}
+""", ".ts")
+        self.assertNotIn("dom-html-sink", achados)
+
+    def test_dangerously_set_inner_html_dinamico(self):
+        """Regressao de PARSE: o atributo JSX sozinho nao e' JS valido, e o
+        Semgrep recusava a regra inteira com "Rule parse error" -- o que
+        aparecia como zero achados, nao como falha."""
+        achados = self._rodar(self.ARQ,
+            'export const A = ({html}) => <div dangerouslySetInnerHTML={{__html: html}} />\n',
+            ".tsx")
+        self.assertIn("react-dangerously-set-inner-html", achados)
+
+    def test_dangerously_set_inner_html_sanitizado_ou_literal(self):
+        achados = self._rodar(self.ARQ, """
+import DOMPurify from 'dompurify'
+export const A = ({html}) => <div dangerouslySetInnerHTML={{__html: DOMPurify.sanitize(html)}} />
+export const B = () => <div dangerouslySetInnerHTML={{__html: "<b>fixo</b>"}} />
+""", ".tsx")
+        self.assertNotIn("react-dangerously-set-inner-html", achados)
+
+    def test_sanitizar_e_depois_concatenar(self):
+        """O README do DOMPurify avisa com todas as letras. E' o erro que
+        PARECE cuidado -- ha' uma chamada de sanitize bem ali."""
+        achados = self._rodar(self.ARQ, """
+import DOMPurify from 'dompurify'
+export function f(el, sujo, rodape) {
+  el.innerHTML = DOMPurify.sanitize(sujo) + rodape
+}
+""", ".ts")
+        self.assertIn("sanitize-depois-modificado", achados)
+
+
+class TestRegrasDomPurifyConfig(_BaseRegras):
+    ARQ = "dompurify-config.yaml"
+
+    def test_opcoes_que_reabrem_execucao(self):
+        achados = self._rodar(self.ARQ, """
+import DOMPurify from 'dompurify'
+const a = DOMPurify.sanitize(x, { ALLOW_UNKNOWN_PROTOCOLS: true })
+const b = DOMPurify.sanitize(x, { SAFE_FOR_XML: false })
+const c = DOMPurify.sanitize(x, { SANITIZE_DOM: false })
+const d = DOMPurify.sanitize(x, { IN_PLACE: true })
+""", ".ts")
+        self.assertIn("dompurify-config-permissiva", achados)
+
+    def test_add_tags_e_attr_executaveis(self):
+        achados = self._rodar(self.ARQ, """
+import DOMPurify from 'dompurify'
+const e = DOMPurify.sanitize(x, { ADD_TAGS: ['style', 'iframe'] })
+const f = DOMPurify.sanitize(x, { ADD_ATTR: ['target', 'onerror'] })
+""", ".ts")
+        self.assertIn("dompurify-add-perigoso", achados)
+
+    def test_hook_que_devolve_atributo_executavel(self):
+        """Regressao de aspas: o `metavariable-regex` casa contra o TEXTO do
+        no', e JS usa tanto ' quanto ". Prever so' aspas duplas fazia a regra
+        compilar e nunca disparar -- o pior dos dois mundos."""
+        achados = self._rodar(self.ARQ,
+            "import DOMPurify from 'dompurify'\n"
+            "DOMPurify.addHook('afterSanitizeAttributes', function (node) "
+            "{ node.setAttribute('onclick', 'go()') })\n", ".ts")
+        self.assertIn("dompurify-hook-que-desfaz", achados)
+
+    def test_configuracao_correta_fica_silenciosa(self):
+        """Inclui os dois casos que ENDURECEM e seriam falso positivo fácil:
+        `ADD_ATTR: ['target']` e um hook que repõe `rel=noopener`."""
+        achados = self._rodar(self.ARQ, """
+import DOMPurify from 'dompurify'
+const a = DOMPurify.sanitize(x)
+const b = DOMPurify.sanitize(x, { ALLOWED_TAGS: ['b', 'i'], ADD_ATTR: ['target'] })
+const c = DOMPurify.sanitize(x, { SAFE_FOR_XML: true, RETURN_TRUSTED_TYPE: true })
+DOMPurify.addHook('afterSanitizeAttributes', function (node) { node.setAttribute('rel', 'noopener') })
+""", ".ts")
+        self.assertEqual(achados, set())

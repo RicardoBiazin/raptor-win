@@ -1,0 +1,111 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Sinks de HTML no DOM, em JS/TS.
+  #
+  # NAO sao regras do RAPTOR. A regra de XSS do upstream
+  # (rules/raptor/injection/xss.yaml) so' cobre Python: as fontes sao
+  # `request.GET`/`flask.request` e os sinks sao `mark_safe`, `Markup` e
+  # `render_template_string`. Num app React/Vite ela nao dispara nunca -- e os
+  # packs `p/react` e `p/typescript` tambem nao pegaram os `document.write`
+  # com interpolacao que medi em dois projetos reais antes de escrever isto.
+  #
+  # Precisao acima de recall, como o resto da ferramenta: so' acuso o sink
+  # alimentado por valor NAO literal. `innerHTML = ''` para limpar um no', ou
+  # uma string constante, sao o uso comum e correto -- acusa-los poria a regra
+  # no ruido e tiraria a atencao do caso que importa.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.xss.dom-html-sink
+    message: >-
+      HTML montado dinamicamente entra num sink do DOM sem sanitizacao visivel.
+      Diferente de texto, o que entra aqui e' PARSEADO como marcacao: um
+      `<img onerror=...>` vindo de dado do usuario executa. Sanitize com
+      DOMPurify antes (`el.innerHTML = DOMPurify.sanitize(html)`), ou use
+      `textContent` se o conteudo nao precisa ser HTML.
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $V
+          - pattern: $EL.outerHTML = $V
+          - pattern: $EL.insertAdjacentHTML($POS, $V)
+          - pattern: $W.document.write($V)
+          - pattern: $W.document.writeln($V)
+          - pattern: document.write($V)
+          - pattern: document.writeln($V)
+          - pattern: $R.createContextualFragment($V)
+      # Literal sem interpolacao nao e' dinamico: e' o autor escrevendo HTML.
+      - pattern-not: $EL.innerHTML = "..."
+      - pattern-not: $EL.outerHTML = "..."
+      - pattern-not: $EL.insertAdjacentHTML($POS, "...")
+      - pattern-not: $W.document.write("...")
+      - pattern-not: document.write("...")
+      # Ja' sanitizado: o proposito da regra e' achar quem NAO sanitiza.
+      - pattern-not: $EL.innerHTML = DOMPurify.sanitize(...)
+      - pattern-not: $EL.innerHTML = $P.sanitize(...)
+      - pattern-not: $EL.outerHTML = DOMPurify.sanitize(...)
+      - pattern-not: $EL.insertAdjacentHTML($POS, DOMPurify.sanitize(...))
+      - pattern-not: $W.document.write(DOMPurify.sanitize(...))
+      - pattern-not: document.write(DOMPurify.sanitize(...))
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "xss", "dom", "innerHTML", "document-write"]
+
+  # ---------------------------------------------------------------------------
+  # dangerouslySetInnerHTML do React sem sanitizacao.
+  #
+  # O nome ja' avisa, mas o aviso some depois da terceira vez que alguem le'.
+  # O React escapa TEXTO; este prop e' a porta explicita para escapar do
+  # escape, e e' o sink numero um de um app React.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.xss.react-dangerously-set-inner-html
+    message: >-
+      `dangerouslySetInnerHTML` recebe valor dinamico sem sanitizacao visivel.
+      O React escapa texto, mas este prop existe justamente para NAO escapar:
+      o que entrar aqui e' parseado como HTML. Passe por
+      `DOMPurify.sanitize(...)` antes, ou renderize como texto.
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      # O atributo SOZINHO nao e' JS valido e o Semgrep recusa a regra inteira
+      # ("Rule parse error"). O padrao tem de ser um elemento JSX completo.
+      - pattern-either:
+          - pattern: "<$EL ... dangerouslySetInnerHTML={{__html: $V}} />"
+          - pattern: "<$EL ... dangerouslySetInnerHTML={{__html: $V}}>...</$EL>"
+      - pattern-not: '<$EL ... dangerouslySetInnerHTML={{__html: "..."}} />'
+      - pattern-not: '<$EL ... dangerouslySetInnerHTML={{__html: "..."}}>...</$EL>'
+      - pattern-not: "<$EL ... dangerouslySetInnerHTML={{__html: DOMPurify.sanitize(...)}} />"
+      - pattern-not: "<$EL ... dangerouslySetInnerHTML={{__html: DOMPurify.sanitize(...)}}>...</$EL>"
+      - pattern-not: "<$EL ... dangerouslySetInnerHTML={{__html: $P.sanitize(...)}} />"
+      - pattern-not: "<$EL ... dangerouslySetInnerHTML={{__html: $P.sanitize(...)}}>...</$EL>"
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "xss", "react", "dangerouslySetInnerHTML"]
+
+  # ---------------------------------------------------------------------------
+  # Sanitizar e DEPOIS mexer na string.
+  #
+  # O README do DOMPurify avisa com todas as letras: "if you first sanitize HTML
+  # and then modify it afterwards, you might easily void the effects of
+  # sanitization". E' um erro que parece cuidado -- ha' uma chamada de sanitize
+  # bem ali --, e por isso passa em revisao de codigo.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.xss.sanitize-depois-modificado
+    message: >-
+      A saida de `sanitize()` e' alterada por concatenacao ou `replace` antes de
+      chegar ao DOM. Isso anula a sanitizacao: o DOMPurify garante a arvore que
+      ELE produziu, nao a string que voce montou depois dela. Faca a montagem
+      primeiro e sanitize o resultado final, uma vez so'.
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: DOMPurify.sanitize(...) + $X
+          - pattern: $X + DOMPurify.sanitize(...)
+          - pattern: DOMPurify.sanitize(...).replace(...)
+          - pattern: DOMPurify.sanitize(...).concat(...)
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "xss", "dompurify", "sanitize-then-modify"]
