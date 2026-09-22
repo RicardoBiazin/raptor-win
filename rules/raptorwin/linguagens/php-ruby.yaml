@@ -1,0 +1,118 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # PHP e Ruby. NENHUM projeto que escaneio hoje usa qualquer um dos dois --
+  # entram porque a ferramenta e' publica e nao deve cobrir so' a pilha de quem
+  # a escreveu.
+  #
+  # O conjunto do RAPTOR quase nao alcanca estas duas: 3 regras com `php` e 2
+  # com `ruby`, contra 52 de Python e 43 de Java. Os packs `p/php` e `p/ruby`
+  # do Registry cobrem parte, mas so' entram com `--registry` ligado e rede
+  # disponivel; o que segue vale offline.
+  # ---------------------------------------------------------------------------
+
+  # `unserialize()` em dado da requisicao.
+  #
+  # Nao e' "parsing inseguro": o formato serializado do PHP carrega o NOME DA
+  # CLASSE, e desserializar instancia o objeto e dispara os metodos magicos
+  # (`__wakeup`, `__destruct`, `__toString`). Com as classes certas ja'
+  # carregadas -- e um framework carrega centenas --, encadeia-se uma "POP
+  # chain" que chega a execucao de comando. E' a raiz de boa parte dos RCEs
+  # historicos de PHP.
+  #
+  # `json_decode` resolve quando o que se quer e' so' dado.
+  - id: raptorwin.linguagens.php-unserialize-de-entrada
+    message: >-
+      `unserialize()` sobre dado da requisicao. O formato serializado do PHP
+      carrega o NOME DA CLASSE: desserializar INSTANCIA o objeto e dispara os
+      metodos magicos (`__wakeup`, `__destruct`). Com as classes que um
+      framework ja' carrega, isso encadeia ate' execucao de comando. Se o que
+      voce quer e' dado, use `json_decode()`.
+    languages: [php]
+    severity: ERROR
+    pattern-either:
+      - pattern: unserialize($_GET[...])
+      - pattern: unserialize($_POST[...])
+      - pattern: unserialize($_REQUEST[...])
+      - pattern: unserialize($_COOKIE[...])
+      - pattern: unserialize(base64_decode($_GET[...]))
+      - pattern: unserialize(base64_decode($_POST[...]))
+      - pattern: unserialize(base64_decode($_COOKIE[...]))
+    metadata:
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+      owasp_top_10: ["A08:2021-Software and Data Integrity Failures"]
+      tags: ["security", "php", "deserialization", "rce"]
+
+  # `include`/`require` com caminho da requisicao.
+  #
+  # Inclusao de arquivo local vira execucao: o PHP nao le' o arquivo, ele o
+  # INTERPRETA. Um log com `<?php` dentro, um upload, `/proc/self/environ` --
+  # qualquer coisa que o atacante consiga influenciar e ler vira codigo.
+  - id: raptorwin.linguagens.php-include-de-entrada
+    message: >-
+      `include`/`require` com caminho vindo da requisicao. O PHP nao LE' o
+      arquivo incluido, ele o INTERPRETA: qualquer arquivo em que o atacante
+      consiga por `<?php` -- um log, um upload -- vira codigo executado. Use
+      uma lista fixa de nomes permitidos, nunca o valor cru.
+    languages: [php]
+    severity: ERROR
+    pattern-either:
+      - pattern: include($_GET[...]);
+      - pattern: include($_POST[...]);
+      - pattern: include($_REQUEST[...]);
+      - pattern: include_once($_GET[...]);
+      - pattern: require($_GET[...]);
+      - pattern: require($_POST[...]);
+      - pattern: require_once($_GET[...]);
+    metadata:
+      cwe: ["CWE-98: Improper Control of Filename for Include/Require in PHP"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "php", "lfi", "rce"]
+
+  # `YAML.load` do Ruby em dado de fora.
+  #
+  # Mesma familia do `unserialize`: ate' o Psych 4 o `YAML.load` instanciava
+  # objetos Ruby arbitrarios a partir das tags do documento. Em Rails antigo
+  # isso rendeu CVE de execucao remota. `YAML.safe_load` so' aceita tipos
+  # basicos, e e' o padrao desde o Psych 4 -- mas codigo antigo e gem antiga
+  # continuam chamando `load`.
+  - id: raptorwin.linguagens.ruby-yaml-load-inseguro
+    message: >-
+      `YAML.load` sobre dado de fora. Ate' o Psych 4 ele instanciava objetos
+      Ruby arbitrarios a partir das tags do documento -- foi assim que o Rails
+      levou CVE de execucao remota. Use `YAML.safe_load`, que so' aceita tipos
+      basicos.
+    languages: [ruby]
+    severity: ERROR
+    pattern-either:
+      - pattern: YAML.load(params[...])
+      - pattern: YAML.load(request.$ANY)
+      - pattern: Psych.load(params[...])
+      - pattern: YAML.load(File.read($X))
+      - pattern: Marshal.load(params[...])
+    metadata:
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+      owasp_top_10: ["A08:2021-Software and Data Integrity Failures"]
+      tags: ["security", "ruby", "rails", "deserialization"]
+
+  # `send`/`public_send` com nome de metodo vindo do usuario.
+  #
+  # E' invocacao dinamica: quem escolhe o nome escolhe QUAL metodo do objeto
+  # roda. Em Rails, um controller responde a dezenas de metodos herdados, e
+  # alguns tocam o banco ou o sistema de arquivos. `public_send` limita aos
+  # publicos e reduz a superficie, mas nao a fecha.
+  - id: raptorwin.linguagens.ruby-send-dinamico
+    message: >-
+      `send`/`public_send` com nome de metodo vindo do usuario: quem manda o
+      parametro escolhe qual metodo do objeto roda, e um controller Rails
+      responde a dezenas de metodos herdados. Use um `case` explicito, ou uma
+      lista de metodos permitidos.
+    languages: [ruby]
+    severity: WARNING
+    pattern-either:
+      - pattern: $OBJ.send(params[...], ...)
+      - pattern: $OBJ.public_send(params[...], ...)
+      - pattern: $OBJ.send(params[...])
+    metadata:
+      cwe: ["CWE-470: Use of Externally-Controlled Input to Select Classes or Code"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "ruby", "rails"]

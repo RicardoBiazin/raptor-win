@@ -68,8 +68,35 @@ LANG_PACKS: dict[str, list[str]] = {
     ".js": ["p/javascript"], ".jsx": ["p/react"], ".mjs": ["p/javascript"], ".cjs": ["p/javascript"],
     ".py": ["p/python"], ".go": ["p/golang"], ".rb": ["p/ruby"], ".java": ["p/java"],
     ".php": ["p/php"], ".cs": ["p/csharp"], ".c": ["p/c"], ".h": ["p/c"], ".cpp": ["p/cpp"],
-    ".tf": ["p/terraform"], ".dockerfile": ["p/dockerfile"], ".yml": [], ".yaml": [],
+    ".tf": ["p/terraform"], ".dockerfile": ["p/dockerfile"],
+    # `.yml`/`.yaml` NAO ganham pack de linguagem: o Registry nao tem um pack
+    # generico de YAML que valha, e o conteudo varia demais (workflow do GHA,
+    # compose, manifesto k8s, config de app). Quem cobre esses e' o conjunto
+    # proprio em `rules/raptorwin/infra/`.
+    ".yml": [], ".yaml": [],
 }
+
+# Seleção por NOME de arquivo, porque extensão não alcança estes.
+#
+# Um Dockerfile de verdade se chama `Dockerfile` — sem extensão nenhuma. O mapa
+# acima só casava `app.dockerfile`, que quase ninguém usa: na prática o
+# `p/dockerfile` NUNCA era selecionado, e a varredura de container passava em
+# branco sem que nada avisasse. Medido em 21/09/2026.
+#
+# A comparação é por nome em minúsculas e também por PREFIXO com ponto, para
+# pegar `Dockerfile.prod` e `Dockerfile.dev`.
+NOME_PACKS: dict[str, list[str]] = {
+    "dockerfile": ["p/dockerfile"],
+    "containerfile": ["p/dockerfile"],
+}
+
+
+def packs_do_nome(nome: str) -> list[str]:
+    n = nome.lower()
+    for base, packs in NOME_PACKS.items():
+        if n == base or n.startswith(base + "."):
+            return packs
+    return []
 # Packs added regardless of language.
 ALWAYS_PACKS = ["p/secrets"]
 
@@ -176,21 +203,29 @@ def find_semgrep() -> str | None:
 
 
 def detect_languages(targets: list[Path]) -> set[str]:
-    exts: set[str] = set()
+    """Extensões encontradas, MAIS os packs que só o nome do arquivo revela.
+
+    Os nomes entram no mesmo conjunto já resolvidos como pack (`p/dockerfile`),
+    e não como extensão: assim `build_configs` continua com uma lista só para
+    percorrer, e quem lê não precisa saber que há duas origens.
+    """
+    achados: set[str] = set()
+
+    def registrar(p: Path) -> None:
+        achados.add(p.suffix.lower())
+        achados.update(packs_do_nome(p.name))
+
     for t in targets:
         if t.is_file():
-            exts.add(t.suffix.lower())
+            registrar(t)
             continue
         for p in t.rglob("*"):
             if p.is_dir():
-                if p.name in SKIP_DIRS:
-                    # prune by skipping; rglob can't prune, so we filter on files below
-                    continue
                 continue
             if any(part in SKIP_DIRS for part in p.parts):
                 continue
-            exts.add(p.suffix.lower())
-    return exts
+            registrar(p)
+    return achados
 
 
 def build_configs(exts: set[str], use_raptor: bool, use_registry: bool,
@@ -206,7 +241,9 @@ def build_configs(exts: set[str], use_raptor: bool, use_registry: bool,
     if use_registry:
         packs: list[str] = list(ALWAYS_PACKS)
         for e in exts:
-            packs += LANG_PACKS.get(e, [])
+            # O conjunto traz extensões (".py") e packs já resolvidos
+            # ("p/dockerfile", vindos do nome do arquivo). Ver detect_languages.
+            packs += [e] if e.startswith("p/") else LANG_PACKS.get(e, [])
         # dedup, keep order
         seen: set[str] = set()
         for p in packs:

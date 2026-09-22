@@ -35,6 +35,8 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | **Supply chain** from the lockfile: install scripts, non-registry `resolved`, missing `integrity`, extra pip index | Download or execute the package |
 | **Personal data reaching a log** (LGPD: CPF, CNPJ, RG, PIS, CNS) | Cross-file taint (Semgrep OSS is intra-file) |
 | **Raw caught error returned to the client** | — |
+| **CI & containers**: GitHub Actions script injection, `pull_request_target` with PR checkout, Dockerfile & compose hardening | — |
+| **PHP / Ruby**: `unserialize` and `include` from the request, `YAML.load`, dynamic `send` | — |
 | De-dup, severity triage, tooling/test heuristic | Need a sandbox (it never executes code) |
 | Console + Markdown + **SARIF** + raw JSON report | — |
 | Diff mode (`--changed`) + CI exit codes (`--fail-on`) | — |
@@ -122,6 +124,27 @@ Windows launcher (puts `semgrep` on PATH automatically):
   "all clear". `raptor-win` therefore queries by **name**, then compares the ref locally. A ref it
   cannot order (a SHA pin, a branch) or a floating major tag whose fix lands inside the same major
   is reported as **needs review**, never as clean.
+- **CI and containers** — the RAPTOR rule set has *no* infrastructure rules at all
+  (checked: zero files declaring `yaml`, `dockerfile`, `terraform` or `hcl`), and this tool sent
+  no Registry pack for `.yml`/`.yaml` either. That was a blind spot covering the whole CI surface.
+
+  The new rules target what costs most: `${{ github.event.* }}` interpolated into a `run:` block
+  (the runner substitutes **text into the script** before a shell exists — no quoting protects
+  you, and under `pull_request_target` or `issue_comment` that script holds a write-scoped token);
+  `pull_request_target` checking out the PR's own code; `permissions: write-all`; `ADD` from a
+  remote URL; secrets passed as `ARG` (they stay in `docker history` forever); `curl | sh` during
+  a build; the Docker socket mounted into a container; privileged containers; shared host
+  namespaces.
+
+  Related fix: `Dockerfile` — the canonical name, with **no extension** — never selected
+  `p/dockerfile`, because the pack map keyed off the extension `.dockerfile`. Container scanning
+  was effectively dead and nothing said so. Packs are now also selected by file name.
+
+- **Languages beyond this tool's own stack** — PHP and Ruby get 3 and 2 rules from RAPTOR, against
+  52 for Python. Added: `unserialize()` and `include` on request data (PHP *interprets* an included
+  file, so any file an attacker can write `<?php` into becomes code), `YAML.load`, and `send` with
+  a user-chosen method name.
+
 - **Security headers** — always on, no flag, like the SQL lint. `helmet` solves this in one
   line for Express, but a Vite/React app on Netlify or Vercel *has no Express*: there is no
   middleware to hang a header on. The headers live in `netlify.toml`, `_headers` or

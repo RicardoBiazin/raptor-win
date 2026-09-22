@@ -1,0 +1,143 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Dockerfile e compose. NAO sao regras do RAPTOR: o conjunto dele nao tem
+  # nenhuma regra de infraestrutura.
+  #
+  # O pack `p/dockerfile` do Registry cobre parte disto, mas ate' 21/09/2026 ele
+  # NUNCA era selecionado aqui: o mapa de packs casava a extensao
+  # `.dockerfile`, e um Dockerfile de verdade se chama `Dockerfile`, sem
+  # extensao nenhuma. Conferido e corrigido junto com estas regras -- mas o
+  # conjunto proprio fica, porque o que segue e' o que mais custa caro e nao
+  # depende de o pack estar disponivel.
+  # ---------------------------------------------------------------------------
+
+  # `ADD` com URL remota: baixa e escreve no build, sem verificar nada.
+  #
+  # Diferente do `COPY`, o `ADD` aceita URL -- e o que vier entra na imagem.
+  # Nao ha' hash, nao ha' assinatura, e o servidor do outro lado pode responder
+  # coisas diferentes em builds diferentes. Se o host for comprometido, ou o DNS
+  # for sequestrado, a imagem sai com o conteudo de outra pessoa e ninguem
+  # percebe: o build passa.
+  - id: raptorwin.infra.dockerfile-add-remoto
+    message: >-
+      `ADD` com URL remota baixa e grava na imagem sem verificar nada -- sem
+      hash, sem assinatura, e o servidor pode responder diferente a cada build.
+      Use `curl`/`wget` num `RUN` e confira o checksum no mesmo passo, ou traga
+      o arquivo para o repositorio e use `COPY`.
+    languages: [dockerfile]
+    severity: WARNING
+    pattern-regex: "(?im)^\\s*ADD\\s+(--\\S+\\s+)*(https?|ftp)://"
+    metadata:
+      cwe: ["CWE-494: Download of Code Without Integrity Check"]
+      owasp_top_10: ["A08:2021-Software and Data Integrity Failures"]
+      tags: ["security", "docker", "supply-chain"]
+
+  # Segredo passado por ARG.
+  #
+  # `ARG` fica gravado no HISTORICO da imagem: `docker history` devolve o valor,
+  # e quem baixar a imagem do registro le' junto. Apagar o arquivo numa camada
+  # seguinte nao adianta -- a camada anterior continua la'.
+  #
+  # O jeito certo e' `RUN --mount=type=secret`, que monta o segredo so' durante
+  # aquele passo e nao deixa camada.
+  - id: raptorwin.infra.dockerfile-segredo-em-arg
+    message: >-
+      Segredo declarado como `ARG`. O valor fica gravado no histórico da imagem
+      -- `docker history` o devolve, e quem baixar a imagem do registro lê
+      junto. Apagar depois não resolve: a camada anterior permanece. Use
+      `RUN --mount=type=secret`, que não deixa camada.
+    languages: [dockerfile]
+    severity: ERROR
+    pattern-regex: "(?im)^\\s*ARG\\s+[A-Za-z0-9_]*(SECRET|TOKEN|PASSWORD|PASSWD|SENHA|API_?KEY|PRIVATE_?KEY|CREDENTIAL)[A-Za-z0-9_]*\\s*="
+    metadata:
+      cwe: ["CWE-522: Insufficiently Protected Credentials"]
+      owasp_top_10: ["A07:2021-Identification and Authentication Failures"]
+      tags: ["security", "docker", "secrets"]
+
+  # `curl | sh` no build.
+  #
+  # Executa o que o servidor devolver, no momento do build, com privilegio de
+  # root dentro da imagem. E' a mesma familia do `ADD` remoto, mas pior: ali o
+  # conteudo virava arquivo, aqui vira comando.
+  - id: raptorwin.infra.dockerfile-curl-pipe-shell
+    message: >-
+      Script baixado e canalizado direto para o shell durante o build. Executa o
+      que o servidor devolver, como root, sem conferência nenhuma -- e o
+      resultado entra na imagem. Baixe, confira o checksum, e só então execute.
+    languages: [dockerfile]
+    severity: ERROR
+    pattern-regex: "(?i)(curl|wget)[^\\n|]*\\|\\s*(sudo\\s+)?(ba|z|k|d)?sh\\b"
+    metadata:
+      cwe: ["CWE-494: Download of Code Without Integrity Check"]
+      owasp_top_10: ["A08:2021-Software and Data Integrity Failures"]
+      tags: ["security", "docker", "supply-chain"]
+
+  # ---------------------------------------------------------------------------
+  # docker-compose / Kubernetes: configuracao que desfaz o isolamento.
+  #
+  # As tres abaixo tem o mesmo efeito pratico -- quem controlar o processo do
+  # contêiner controla o HOST. Nao sao "endurecimento opcional": sao a diferenca
+  # entre uma invasao contida no contêiner e uma invasao na máquina.
+  # ---------------------------------------------------------------------------
+
+  # Socket do Docker montado dentro do contêiner.
+  #
+  # O `docker.sock` e' a API do daemon, e o daemon roda como root no host. Quem
+  # alcanca esse socket cria um contêiner novo montando `/` do host e sai de
+  # dentro -- e' escape documentado, de uma linha. Montar "so' para leitura"
+  # nao muda nada: a API inteira responde por ali.
+  - id: raptorwin.infra.compose-docker-sock
+    message: >-
+      Socket do Docker montado no contêiner. Esse socket é a API do daemon, que
+      roda como root no host: quem o alcança cria outro contêiner montando `/`
+      e sai de dentro. `:ro` não ajuda -- a API responde por ali de qualquer
+      jeito. Use um proxy de socket com lista de endpoints, ou tire o acesso.
+    languages: [yaml]
+    severity: ERROR
+    # Ancorada na LINHA: `- /var/run/docker.sock:/var/run/docker.sock:ro` tem o
+    # caminho duas vezes (origem e destino), e a regex solta acusava o mesmo
+    # volume duas vezes. Um achado por linha.
+    pattern-regex: '(?m)^.*/var/run/docker\.sock.*$'
+    metadata:
+      cwe: ["CWE-250: Execution with Unnecessary Privileges"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      tags: ["security", "docker", "container-escape"]
+
+  # Contêiner privilegiado.
+  #
+  # `privileged: true` (compose) e `privileged: true` em `securityContext`
+  # (k8s) entregam todas as capabilities e o acesso aos dispositivos do host.
+  # E' equivalente a rodar no host, com um namespace de enfeite.
+  - id: raptorwin.infra.container-privilegiado
+    message: >-
+      Contêiner privilegiado: recebe todas as capabilities e os dispositivos do
+      host. O isolamento vira enfeite -- é equivalente a rodar no host.
+      Conceda as capabilities específicas de que precisa (`cap_add`) em vez do
+      privilégio inteiro.
+    languages: [yaml]
+    severity: ERROR
+    pattern-regex: "(?m)^\\s*privileged:\\s*(true|yes)\\s*$"
+    metadata:
+      cwe: ["CWE-250: Execution with Unnecessary Privileges"]
+      owasp_top_10: ["A05:2021-Security Misconfiguration"]
+      tags: ["security", "docker", "kubernetes", "container-escape"]
+
+  # Namespace do host compartilhado.
+  #
+  # `network_mode: host`, `pid: host`, `hostPID`, `hostNetwork`: o contêiner
+  # passa a ver a rede ou os processos do host. Com `pid`, da' para ler
+  # `/proc/<pid>/environ` de QUALQUER processo da máquina -- incluindo os
+  # segredos que estao no ambiente deles.
+  - id: raptorwin.infra.container-namespace-do-host
+    message: >-
+      Contêiner compartilhando namespace do host (rede, PID ou IPC). Com o
+      namespace de PID dá para ler `/proc/<pid>/environ` de qualquer processo da
+      máquina -- e é lá que costumam estar os segredos dos outros serviços.
+      Publique portas em vez de `network_mode: host`.
+    languages: [yaml]
+    severity: WARNING
+    pattern-regex: "(?m)^\\s*(network_mode:\\s*[\"']?host|pid:\\s*[\"']?host|ipc:\\s*[\"']?host|hostNetwork:\\s*true|hostPID:\\s*true|hostIPC:\\s*true)"
+    metadata:
+      cwe: ["CWE-668: Exposure of Resource to Wrong Sphere"]
+      owasp_top_10: ["A05:2021-Security Misconfiguration"]
+      tags: ["security", "docker", "kubernetes"]

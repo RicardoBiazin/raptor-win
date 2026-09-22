@@ -2325,3 +2325,218 @@ class TestClaudeEFerramenta(unittest.TestCase):
         silencia codigo de aplicacao."""
         self.assertEqual(raptor_win.classify_context("src/.claudex/a.ts", "x"), "")
         self.assertEqual(raptor_win.classify_context("src/lib/app.ts", "x"), "")
+
+
+# ---------------------------------------------------------------------------
+# Trava estrutural: TODO arquivo de regra tem de carregar
+# ---------------------------------------------------------------------------
+
+class TestTodasAsRegrasCarregam(unittest.TestCase):
+    """Um arquivo de regra que nao carrega para de disparar EM SILENCIO.
+
+    O Semgrep nao reprova a execucao por causa disso: ele reporta o arquivo
+    invalido em `errors` e segue, entao o scan termina com codigo 0 e menos
+    cobertura do que se imagina. Ninguem olha `errors`.
+
+    Aconteceu ao escrever `rules/raptorwin/infra/container.yaml`: um `\\.`
+    dentro de escalar YAML com aspas DUPLAS e' escape desconhecido, o arquivo
+    inteiro parou de carregar, e as SEIS regras dele sumiram de uma vez. O
+    sintoma foi "zero achados" num arquivo de amostra propositalmente cheio de
+    defeitos -- que e' exatamente como um scan saudavel se parece.
+
+    Aspas simples resolvem: o YAML nao processa escape dentro delas.
+    """
+    RAIZ = Path(__file__).resolve().parent.parent / "rules"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.semgrep = raptor_win.find_semgrep()
+        if not cls.semgrep:
+            raise unittest.SkipTest("semgrep não encontrado")
+
+    def test_nenhum_arquivo_de_regra_falha_ao_carregar(self):
+        alvos = sorted(self.RAIZ.rglob("*.yaml"))
+        self.assertGreater(len(alvos), 40, "não achei os arquivos de regra")
+        vazio = Path(tempfile.mkdtemp())
+        (vazio / "nada.txt").write_text("", encoding="utf-8")
+
+        env = os.environ.copy()
+        pasta = str(Path(self.semgrep).parent)
+        if pasta not in env.get("PATH", "").split(os.pathsep):
+            env["PATH"] = pasta + os.pathsep + env.get("PATH", "")
+
+        # Carrega TUDO de uma vez: é assim que o scanner faz, e é o cenário em
+        # que um arquivo quebrado derruba a cobertura dos outros.
+        saida = subprocess.run(
+            [self.semgrep, "--config", str(self.RAIZ), "--json", "--metrics=off",
+             "--quiet", str(vazio)],
+            capture_output=True, text=True, timeout=600, env=env)
+        self.assertTrue(saida.stdout.strip(),
+                        f"semgrep não produziu saída: {saida.stderr[:300]}")
+        dados = json.loads(saida.stdout)
+        ruins = [e for e in dados.get("errors", [])
+                 if any(t in str(e.get("message", "")).lower()
+                        for t in ("invalid yaml", "rule parse", "invalid rule",
+                                  "invalid configuration"))]
+        self.assertEqual(ruins, [], f"arquivo(s) de regra não carregam: {ruins}")
+
+    def test_todo_id_de_regra_e_unico(self):
+        """Id repetido faz o Semgrep manter um e descartar o outro -- de novo,
+        sem reprovar nada."""
+        vistos: dict[str, str] = {}
+        repetidos: list[str] = []
+        for arq in sorted(self.RAIZ.rglob("*.yaml")):
+            for linha in arq.read_text(encoding="utf-8", errors="replace").splitlines():
+                t = linha.strip()
+                if not t.startswith("- id:"):
+                    continue
+                rid = t[len("- id:"):].strip()
+                if rid in vistos:
+                    repetidos.append(f"{rid} ({vistos[rid]} e {arq.name})")
+                vistos[rid] = arq.name
+        self.assertEqual(repetidos, [], f"ids repetidos: {repetidos}")
+
+
+class TestPacksPorNomeDeArquivo(unittest.TestCase):
+    def test_dockerfile_sem_extensao_seleciona_o_pack(self):
+        """O defeito que motivou `packs_do_nome`: o mapa casava a EXTENSAO
+        `.dockerfile`, e um Dockerfile de verdade se chama `Dockerfile`, sem
+        extensao nenhuma. Na pratica o `p/dockerfile` nunca era selecionado, e
+        a varredura de contêiner passava em branco sem avisar."""
+        self.assertEqual(raptor_win.packs_do_nome("Dockerfile"), ["p/dockerfile"])
+        self.assertEqual(raptor_win.packs_do_nome("dockerfile"), ["p/dockerfile"])
+        self.assertEqual(raptor_win.packs_do_nome("Dockerfile.prod"), ["p/dockerfile"])
+        self.assertEqual(raptor_win.packs_do_nome("Containerfile"), ["p/dockerfile"])
+
+    def test_nome_parecido_nao_conta(self):
+        self.assertEqual(raptor_win.packs_do_nome("Dockerfilex"), [])
+        self.assertEqual(raptor_win.packs_do_nome("meu-dockerfile-gerador.py"), [])
+        self.assertEqual(raptor_win.packs_do_nome("README.md"), [])
+
+    def test_deteccao_devolve_extensoes_e_packs_juntos(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "Dockerfile").write_text("FROM x", encoding="utf-8")
+        (d / "app.py").write_text("x = 1", encoding="utf-8")
+        achados = raptor_win.detect_languages([d])
+        self.assertIn(".py", achados)
+        self.assertIn("p/dockerfile", achados)
+        configs = raptor_win.build_configs(achados, False, True, Path("nao-existe"))
+        self.assertIn("p/dockerfile", configs)
+        self.assertIn("p/python", configs)
+
+
+class TestRegrasDeInfraELinguagens(_BaseRegras):
+    """Cada regra nova, nos DOIS sentidos. O silêncio no arquivo correto é
+    metade do valor -- regra que grita sempre é regra que se desliga."""
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin"
+
+    def test_gha_injecao_em_run(self):
+        achados = self._rodar("infra/github-actions.yaml", """
+name: CI
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Titulo: ${{ github.event.issue.title }}"
+""", ".yml")
+        self.assertIn("gha-injecao-em-run", achados)
+
+    def test_gha_valor_por_env_e_o_jeito_certo(self):
+        """`${{ }}` é substituição de TEXTO no script, antes de o shell
+        existir. Passar por `env:` faz o valor virar dado para o shell."""
+        achados = self._rodar("infra/github-actions.yaml", """
+name: CI
+on: [push]
+permissions:
+  contents: read
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Titulo: $TITULO"
+        env:
+          TITULO: ${{ github.event.issue.title }}
+""", ".yml")
+        self.assertEqual(achados, set())
+
+    def test_dockerfile_perigoso(self):
+        achados = self._rodar("infra/container.yaml", """
+FROM node:22-alpine
+ARG NPM_TOKEN=abc123
+ADD https://exemplo.com/f.tar.gz /tmp/
+RUN curl -sSL https://get.exemplo.com/i.sh | sh
+""", ".dockerfile")
+        self.assertEqual(achados, {"dockerfile-add-remoto",
+                                   "dockerfile-segredo-em-arg",
+                                   "dockerfile-curl-pipe-shell"})
+
+    def test_dockerfile_correto_fica_calado(self):
+        achados = self._rodar("infra/container.yaml", """
+FROM node:22-alpine@sha256:abc
+ARG NODE_ENV=production
+COPY f.tar.gz /tmp/
+RUN --mount=type=secret,id=npm  npm ci
+USER node
+""", ".dockerfile")
+        self.assertEqual(achados, set())
+
+    def test_compose_que_desfaz_o_isolamento(self):
+        achados = self._rodar("infra/container.yaml", """
+services:
+  app:
+    image: app:1
+    privileged: true
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+""", ".yml")
+        self.assertEqual(achados, {"container-privilegiado",
+                                   "container-namespace-do-host",
+                                   "compose-docker-sock"})
+
+    def test_compose_normal_fica_calado(self):
+        achados = self._rodar("infra/container.yaml", """
+services:
+  app:
+    image: app:1
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dados:/dados
+""", ".yml")
+        self.assertEqual(achados, set())
+
+    def test_php_desserializacao_e_inclusao(self):
+        achados = self._rodar("linguagens/php-ruby.yaml",
+            "<?php\n$o = unserialize($_POST['d']);\ninclude($_GET['p']);\n", ".php")
+        self.assertEqual(achados, {"php-unserialize-de-entrada",
+                                   "php-include-de-entrada"})
+
+    def test_php_com_json_e_lista_fixa_fica_calado(self):
+        achados = self._rodar("linguagens/php-ruby.yaml",
+            "<?php\n$o = json_decode($_POST['d'], true);\n"
+            "$paginas = ['home' => 'home.php'];\n"
+            "$k = $_GET['p'] ?? 'home';\n"
+            "if (isset($paginas[$k])) { include($paginas[$k]); }\n", ".php")
+        self.assertEqual(achados, set())
+
+    def test_ruby_yaml_load_e_send(self):
+        achados = self._rodar("linguagens/php-ruby.yaml",
+            "class C\n  def f\n    d = YAML.load(params[:conf])\n"
+            "    @obj.send(params[:acao])\n  end\nend\n", ".rb")
+        self.assertEqual(achados, {"ruby-yaml-load-inseguro", "ruby-send-dinamico"})
+
+    def test_ruby_safe_load_e_lista_fixa_fica_calado(self):
+        achados = self._rodar("linguagens/php-ruby.yaml",
+            "class C\n  PERMITIDO = %w[listar].freeze\n  def f\n"
+            "    d = YAML.safe_load(params[:conf])\n"
+            "    a = params[:acao]\n"
+            "    @obj.public_send(a) if PERMITIDO.include?(a)\n  end\nend\n", ".rb")
+        self.assertEqual(achados, set())
