@@ -141,3 +141,156 @@ rules:
       cwe: ["CWE-1333"]
       owasp_top_10: ["A3:2021-Injection"]
       tags: ["security", "injection", "redos", "taint"]
+
+  # ---------------------------------------------------------------------------
+  # Java — taint: servlet/Spring params → regex pattern position
+  # Only the PATTERN position is a sink — matching untrusted INPUT
+  # against a constant, linear regex is the safe, normal case.
+  # ---------------------------------------------------------------------------
+  - id: raptor.injection.regex-dos.taint.java
+    message: >-
+      Untrusted data flows into a regular expression pattern. An attacker
+      can supply a catastrophic-backtracking regex (e.g. "(a+)+$") causing
+      a ReDoS that pins a thread per request. Quote the value with
+      Pattern.quote() if it is a literal token, or validate/restrict the
+      pattern before compilation.
+    languages: [java]
+    severity: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          # Servlet
+          - pattern: (HttpServletRequest $REQ).getParameter(...)
+          - pattern: (HttpServletRequest $REQ).getParameterValues(...)
+          - pattern: (HttpServletRequest $REQ).getParameterMap()
+          - pattern: (HttpServletRequest $REQ).getHeader(...)
+          - pattern: (HttpServletRequest $REQ).getPathInfo()
+          - pattern: (HttpServletRequest $REQ).getQueryString()
+          - pattern: (HttpServletRequest $REQ).getRequestURI()
+          # Header/parameter enumerations are request data too: the
+          # Enumeration itself is the source; taint reaches values via
+          # nextElement(). Parameter/header NAMES are attacker-chosen.
+          - pattern: (HttpServletRequest $REQ).getHeaders(...)
+          - pattern: (HttpServletRequest $REQ).getHeaderNames()
+          - pattern: (HttpServletRequest $REQ).getParameterNames()
+          # Spring MVC
+          - pattern: (WebRequest $REQ).getParameter(...)
+          - pattern: (WebRequest $REQ).getHeader(...)
+    pattern-sinks:
+      # focus-metavariable pins the sink to the PATTERN argument so a
+      # tainted SUBJECT string (the overwhelmingly common safe case)
+      # never trips the rule.
+      - patterns:
+          - pattern: Pattern.compile($P, ...)
+          - focus-metavariable: $P
+      - patterns:
+          - pattern: Pattern.matches($P, $IN)
+          - focus-metavariable: $P
+      - patterns:
+          - pattern: $S.matches($P)
+          - focus-metavariable: $P
+      - patterns:
+          - pattern: $S.split($P, ...)
+          - focus-metavariable: $P
+      - patterns:
+          - pattern: $S.replaceAll($P, $R)
+          - focus-metavariable: $P
+      - patterns:
+          - pattern: $S.replaceFirst($P, $R)
+          - focus-metavariable: $P
+    pattern-sanitizers:
+      - pattern: Pattern.quote(...)
+    metadata:
+      cwe: ["CWE-1333"]
+      owasp_top_10: ["A3:2021-Injection"]
+      tags: ["security", "injection", "redos", "taint"]
+
+  # ---------------------------------------------------------------------------
+  # Java — literal pattern with a catastrophic-backtracking shape.
+  # Complements the taint rule above: here the pattern is a constant, and
+  # the DoS comes from attacker-controlled INPUT hitting an exponential
+  # regex. Fires only when the literal contains one of three verified
+  # blowup shapes (all guards are precision-first; misses are accepted):
+  #
+  #   A. Nested unbounded quantifier — "(a+)+", "(\d+)*", "(a{2,})+",
+  #      "(\w+\s?)*": the group body is built ONLY of quantified runs
+  #      and optional atoms (no required delimiter), so iteration
+  #      boundaries are ambiguous, under an unbounded outer quantifier.
+  #      Excluded: required-delimiter groups ("(\.\w+)*", "([^,]*,)+"
+  #      — the delimiter disambiguates, linear), possessive outer
+  #      ")++"/")*+", atomic "(?>", lookarounds (zero-width, match at
+  #      most once), bounded repetition either side, escaped parens
+  #      "\(x+\)+". Known accepted miss: a required atom that merely
+  #      OVERLAPS the run ("(\w\d+)*") needs char-class reasoning a
+  #      shape regex cannot do.
+  #   B. Self-repetition alternation — "(a|aa)+", "(ab|abab)*": both
+  #      branches repeat the same unit, so every input partition is
+  #      ambiguous. Plain overlapping words ("(cat|dog)+") do NOT fire.
+  #   C. Unbounded wildcard run inside an unbounded group — "(.*,)+",
+  #      "(a.+b)*": ".*"/".+" overlaps whatever follows, so iteration
+  #      boundaries are ambiguous. "." inside a character class or
+  #      escaped "\." does not fire.
+  #
+  # Group spellings: every shape admits plain "(", non-capturing "(?:",
+  # named "(?<name>", flag "(?i:" / "(?im-s:", and inline-flag "((?i)"
+  # openings — while still rejecting lookarounds "(?=" "(?!" "(?<=" and
+  # atomic "(?>" (zero-width / non-backtracking). A group is "real" only
+  # behind an EVEN number of regex-level backslashes, so both "\(x+\)+"
+  # (escaped parens, no group) and "\\(a+)+" (literal backslash, real
+  # vulnerable group — fires) classify correctly.
+  #
+  # COMMENTS mode (whitespace-insignificant) gets a coarser core —
+  # unbounded run directly (modulo whitespace) under an unbounded outer
+  # — because delimiter reasoning does not survive ignored whitespace:
+  # inline "(?x)" via a gated fourth alternative below, the
+  # Pattern.COMMENTS flag argument via the dedicated clause. Documented
+  # compromise: within COMMENTS mode, required-delimiter linear
+  # patterns whose run touches the close paren (e.g. "( a+ b+ )+") can
+  # fire; COMMENTS usage is rare and the miss direction is FP-bounded
+  # there, never recall-bounded elsewhere.
+  #
+  # The shape regexes run over the literal's SOURCE text, where Java
+  # doubles regex backslashes ("\\d"); the escape guards hold for both
+  # the doubled and the logical single-backslash form (unpaired-form
+  # ambiguity degrades to a miss, never a false fire).
+  # ---------------------------------------------------------------------------
+  - id: raptor.injection.regex-dos.literal.java
+    message: >-
+      Regex literal has a catastrophic-backtracking shape (nested
+      unbounded quantifiers, self-repeating alternation, or an unbounded
+      wildcard run inside a repeated group). Non-matching input triggers
+      exponential backtracking in java.util.regex — a short crafted
+      string pins the thread (ReDoS). Rewrite with possessive
+      quantifiers/atomic groups, bounded repetition, or an unambiguous
+      structure.
+    languages: [java]
+    severity: MEDIUM
+    patterns:
+      - pattern-either:
+          # Normal-mode literals on any regex sink: shapes A/B/C plus
+          # the (?x)-gated COMMENTS core as a fourth alternative.
+          - patterns:
+              - pattern-either:
+                  - pattern: Pattern.compile("$P", ...)
+                  - pattern: Pattern.matches("$P", $IN)
+                  - pattern: $S.matches("$P")
+                  - pattern: $S.split("$P", ...)
+                  - pattern: $S.replaceAll("$P", $R)
+                  - pattern: $S.replaceFirst("$P", $R)
+              - metavariable-regex:
+                  metavariable: $P
+                  regex: '(?s).*?(?:(?:(?<!\\)(?:\\{4})*\((?:\?<[a-zA-Z][a-zA-Z0-9]*>|\?[a-zA-Z-]*:|\(\?[a-zA-Z-]+\)|(?!\?))(?:(?:\[[^\]]*\]|\\+[^\s]|[^()\\\[\]+*?{}|])\?)*(?:\[[^\]]*\]|\\+[^\s]|[^()\\\[\]+*?{}|])(?:[+*]\??|\{\d+,\})(?:(?:\[[^\]]*\]|\\+[^\s]|[^()\\\[\]+*?{}|])(?:[+*]\??|\{\d+,\}|\?))*\)(?:[+*]|\{\d+,\})(?!\+))|(?:(?<!\\)(?:\\{4})*\((?:\?<[a-zA-Z][a-zA-Z0-9]*>|\?[a-zA-Z-]*:|\(\?[a-zA-Z-]+\)|(?!\?))([^()|\\]+)(?:\1)*\|(?:\1)+\)(?:[+*]|\{\d+,\})(?!\+))|(?:(?<!\\)(?:\\{4})*\((?:\?<[a-zA-Z][a-zA-Z0-9]*>|\?[a-zA-Z-]*:|\(\?[a-zA-Z-]+\)|(?!\?))[^()]*(?<![\\\[])\.[*+](?!\+)[^()]*\)(?:[+*]|\{\d+,\})(?!\+))|(?:(?=.{0,30}?\(\?[a-zA-Z-]*x[a-zA-Z-]*[):]).*?(?<!\\)(?:\\{4})*\((?:\?<[a-zA-Z][a-zA-Z0-9]*>|\?[a-zA-Z-]*:|\(\?[a-zA-Z-]+\)|(?!\?))[^()]*(?<![\\+*])[+*]\??\s*\)\s*(?:[+*]|\{\d+,\})(?!\+)))'
+          # COMMENTS passed as a compile flag: whitespace is
+          # insignificant, so only the coarser core applies.
+          - patterns:
+              - pattern-either:
+                  - pattern: Pattern.compile("$P", Pattern.COMMENTS)
+                  - pattern: Pattern.compile("$P", Pattern.COMMENTS | $F)
+                  - pattern: Pattern.compile("$P", $F | Pattern.COMMENTS)
+              - metavariable-regex:
+                  metavariable: $P
+                  regex: '(?s).*?(?<!\\)(?:\\{4})*\((?:\?<[a-zA-Z][a-zA-Z0-9]*>|\?[a-zA-Z-]*:|\(\?[a-zA-Z-]+\)|(?!\?))[^()]*(?<![\\+*])[+*]\??\s*\)\s*(?:[+*]|\{\d+,\})(?!\+)'
+    metadata:
+      cwe: ["CWE-1333"]
+      owasp_top_10: ["A3:2021-Injection"]
+      tags: ["security", "redos", "backtracking"]
