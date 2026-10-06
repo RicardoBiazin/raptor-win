@@ -422,7 +422,36 @@ def render_console(findings: list[dict], files_scanned: int, rules_run: int) -> 
     print("recursos — reveja, mas normalmente não são exploráveis. Confirme os demais.")
 
 
-def render_markdown(findings: list[dict], target: str, files_scanned: int, rules_run: int) -> str:
+def checagens_extras(secrets: "list[dict] | None", sca: "dict | None") -> list[str]:
+    """Linhas do relatório dizendo quais checagens extras rodaram e o que ficou de fora.
+
+    Sem isto, um relatório limpo com --sca/--secrets era idêntico a um em que
+    elas nem foram pedidas: "0 achados" não dizia se as dependências tinham
+    sido consultadas. Mesmo princípio do console -- nomear o que NÃO foi checado.
+    """
+    linhas = []
+    if secrets is not None:
+        linhas.append(f"- **Credenciais:** verificadas ({len(secrets)} achado(s))")
+    if sca is not None:
+        if sca.get("error"):
+            linhas.append(f"- **SCA:** NÃO realizada ({sca['error']}); "
+                          f"{sca.get('deps', 0)} dependência(s) sem checagem de CVE")
+        else:
+            pinados = sca.get("pinados", sca.get("deps", 0))
+            linha = (f"- **SCA (OSV.dev):** {sca.get('deps', 0)} dependência(s) encontrada(s), "
+                     f"{pinados} checada(s), {len(sca.get('findings', []))} achado(s)")
+            sem_pin = sca.get("sem_pin", [])
+            if sem_pin:
+                linha += f"; {len(sem_pin)} sem versão fixada NÃO checada(s)"
+            vazios = sca.get("vazios", [])
+            if vazios:
+                linha += f"; {len(vazios)} arquivo(s) de dependência sem nada extraído"
+            linhas.append(linha)
+    return linhas
+
+
+def render_markdown(findings: list[dict], target: str, files_scanned: int, rules_run: int,
+                    extras: "list[str] | None" = None) -> str:
     by_sev = Counter(f["severity"] for f in findings)
     order = sorted(by_sev, key=lambda s: SEV_RANK.get(s, 9))
     lines = [
@@ -433,6 +462,7 @@ def render_markdown(findings: list[dict], target: str, files_scanned: int, rules
         f"- **Arquivos SAST:** {files_scanned}",
         f"- **Regras com achado:** {rules_run}",
         f"- **Achados:** {len(findings)} (" + (", ".join(f"{s}: {by_sev[s]}" for s in order) or "0") + ")",
+        *(extras or []),
         "",
         "| Sev | Regra | Local | Contexto |",
         "|-----|-------|-------|----------|",
@@ -1473,6 +1503,7 @@ def main() -> int:
     # propósito: assim atravessam console, Markdown, SARIF e --fail-on sem
     # nenhum tratamento à parte. Um segredo comitado é achado de segurança
     # como outro qualquer — não merece um relatório separado que ninguém lê.
+    seg = None
     if args.secrets:
         seg = secrets_scan.escanear(targets, SKIP_DIRS)
         findings = sorted(findings + seg,
@@ -1548,7 +1579,8 @@ def main() -> int:
         render_console(findings, files_scanned, rules_run)
     if args.md:
         Path(args.md).write_text(
-            render_markdown(findings, str(targets[0]), files_scanned, rules_run),
+            render_markdown(findings, str(targets[0]), files_scanned, rules_run,
+                            checagens_extras(seg, sca)),
             encoding="utf-8")
         print(f"\nMarkdown: {args.md}")
     if args.sarif:

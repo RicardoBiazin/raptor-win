@@ -117,6 +117,31 @@ class ScaTests(unittest.TestCase):
             result = json.loads(sarif.read_text(encoding="utf-8"))["runs"][0]["results"][0]
             self.assertEqual(result["suppressions"][0]["kind"], "external")
 
+    def test_markdown_declara_checagens_extras_mesmo_sem_achados(self):
+        sca = {"sources": ["package-lock.json"], "deps": 3, "pinados": 2,
+               "sem_pin": ["solto"], "vulns": {}, "details": {}, "findings": []}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+            markdown = root / "report.md"
+            argv = ["raptor-win", str(root), "--sca", "--secrets", "--no-raptor",
+                    "--no-registry", "--md", str(markdown)]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(raptor_win, "run_sca", return_value=sca), \
+                    redirect_stdout(io.StringIO()):
+                raptor_win.main()
+            texto = markdown.read_text(encoding="utf-8")
+        self.assertIn("**Credenciais:** verificadas (0 achado(s))", texto)
+        self.assertIn("3 dependência(s) encontrada(s), 2 checada(s), 0 achado(s)", texto)
+        self.assertIn("1 sem versão fixada NÃO checada(s)", texto)
+
+    def test_markdown_sca_com_erro_diz_que_nao_checou(self):
+        linhas = raptor_win.checagens_extras(None, {"error": "timeout", "deps": 5})
+        self.assertEqual(len(linhas), 1)
+        self.assertIn("NÃO realizada", linhas[0])
+        self.assertIn("5 dependência(s) sem checagem", linhas[0])
+        self.assertEqual(raptor_win.checagens_extras(None, None), [])
+
     def test_sca_finding_participates_in_fail_on(self):
         with tempfile.TemporaryDirectory() as td:
             sca = {
