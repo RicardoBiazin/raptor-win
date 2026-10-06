@@ -50,7 +50,33 @@ jobs:
           echo "" >> NOTES.md
           git log --no-merges --pretty='- %s' "$RANGE" >> NOTES.md
 
+      # Idempotente de propósito. `gh release create` devolve
+      # "HTTP 422: Release.tag_name already exists" e reprova o job inteiro se o
+      # Release já existir — e existir é COMUM: basta alguém publicar à mão logo
+      # depois de empurrar a tag. Foi o que aconteceu no v1.12.1, com 31 segundos
+      # de diferença entre a criação manual e este passo.
+      #
+      # Reprovar ali não protege nada: o Release ESTÁ publicado e correto. Só
+      # deixa um X vermelho num workflow cuja premissa é "marcar a tag basta",
+      # e um X que não significa defeito é um X que se aprende a ignorar.
+      #
+      # NÃO sobrescreve o que já está lá. Notas escritas à mão descrevem o
+      # PORQUÊ da versão; a lista de commits que este workflow monta é o
+      # fallback para quando ninguém escreveu nada. Trocar uma pela outra seria
+      # perder informação.
       - name: Publicar o Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes-file NOTES.md
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Rascunho é outra história: o Release existe mas NINGUÉM o vê, e o
+            # workflow terminaria verde sobre uma publicação que não aconteceu.
+            if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" = "true" ]; then
+              echo "::error::Release $TAG existe como RASCUNHO — não está publicado."
+              exit 1
+            fi
+            echo "::notice::Release $TAG já publicado fora deste workflow; notas preservadas."
+            exit 0
+          fi
+          gh release create "$TAG" --title "$TAG" --notes-file NOTES.md
