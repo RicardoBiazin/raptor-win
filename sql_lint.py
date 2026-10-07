@@ -11,6 +11,8 @@ Detecta:
     avalia TODAS por linha e combina com OR — dá para consolidar numa só.
     (Supabase: "Multiple Permissive Policies".) Policies `as restrictive` não
     entram (elas combinam com AND, propósito diferente).
+  * REVOKE de EXECUTE que fecha `anon`/`authenticated` e ESQUECE `public`: o
+    papel continua executando pelo EXECUTE padrão de PUBLIC, do qual herda.
   * REVOKE de EXECUTE que fecha `public`/`anon` e ESQUECE `authenticated`, sem
     nenhum GRANT deliberado para esse papel. Correlaciona comandos de ARQUIVOS
     diferentes — o create, o revoke e o grant da mesma função costumam morar em
@@ -204,6 +206,55 @@ def _achados_revoke_incompleto(revogados: dict, concedidos: dict) -> list[dict]:
                 f"deduzi-lo da sessão, isso é escrita entre inquilinos. Acrescente "
                 f"`authenticated` à lista do revoke; se o acesso for intencional, "
                 f"escreva o GRANT explícito para registrar a intenção."
+            ),
+        })
+    return achados
+
+
+def _achados_revoke_sem_public(revogados: dict, concedidos: dict) -> list[dict]:
+    """O par de `revoke-incompleto`: fecha `anon`/`authenticated` e esquece `public`.
+
+    No Supabase cada função nasce com DOIS caminhos de EXECUTE para o cliente:
+    o grant próprio a `anon`/`authenticated` (do `alter default privileges` da
+    plataforma) E o grant padrão do Postgres a PUBLIC — do qual `anon` e
+    `authenticated` herdam. `revoke ... from anon, authenticated` remove só o
+    primeiro; o papel continua executando pelo segundo. Medido num projeto real:
+    depois desse revoke, `POST /rest/v1/rpc/<fn>` com a chave pública devolveu
+    204, e a função era SECURITY DEFINER que alterava estoque. Acrescentar
+    `public` ao revoke fez a mesma chamada devolver 401.
+
+    União dos papéis entre comandos e ARQUIVOS, como na regra irmã: o revoke de
+    `public` costuma estar numa linha (ou migração) separada, e avaliar o
+    comando isolado acusaria o repositório já correto.
+    """
+    achados: list[dict] = []
+    for (nome, args), info in revogados.items():
+        papeis = info["papeis"]
+        clientes = papeis & {"anon", "authenticated"}
+        if not clientes or "public" in papeis:
+            continue
+        concedido = concedidos.get((nome, args), set())
+        # Revogou de um papel e concedeu a ele mesmo em outro lugar: a intenção
+        # não é "fechar", e o grant explícito já registra o acesso deliberado.
+        clientes -= concedido
+        if not clientes:
+            continue
+        assinatura = f"{nome}({args})" if args else f"{nome}()"
+        achados.append({
+            "rule": "sql.supabase.revoke-sem-public",
+            "severity": "HIGH",
+            "context": "",
+            "path": info["path"],
+            "line": info["line"],
+            "message": (
+                f"`revoke execute on function {assinatura}` fecha "
+                f"{', '.join(sorted(clientes))} mas não `public`. Isso NÃO fecha o "
+                f"acesso: o Postgres concede EXECUTE a PUBLIC em toda função criada, e "
+                f"`anon`/`authenticated` herdam de PUBLIC — a função continua chamável "
+                f"por /rest/v1/rpc/{nome} com a chave pública do site. Se for SECURITY "
+                f"DEFINER, executa com o privilégio do dono, ignorando o RLS. Use "
+                f"`revoke all on function {assinatura} from public, anon, authenticated;` "
+                f"e conceda explicitamente só a quem precisa."
             ),
         })
     return achados
@@ -902,6 +953,7 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
 
     achados += _achados_sem_rls(criadas, com_rls)
     achados += _achados_revoke_incompleto(revogados, concedidos)
+    achados += _achados_revoke_sem_public(revogados, concedidos)
     achados += _achados_execute_nunca_fechado(definidas, mencionados, bloco,
                                               defaults, helpers)
     achados.sort(key=lambda a: (a["path"], a["line"]))

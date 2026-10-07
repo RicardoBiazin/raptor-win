@@ -384,6 +384,16 @@ Static analysis reports *possibilities*; you still validate exploitability.
     role clears the finding. Dynamic targets (`format('revoke ... %s ...')` inside a `DO` block)
     are skipped — the identity isn't knowable by regex.
     This is the first `sql_lint` check above `INFO`: `--fail-on HIGH` can now fail on SQL.
+  - `sql.supabase.revoke-sem-public` (**HIGH**) — the mirror image: `REVOKE EXECUTE ON FUNCTION`
+    that closes `anon`/`authenticated` but omits `public`. Postgres grants `EXECUTE` to `PUBLIC`
+    on every new function, and `anon`/`authenticated` inherit from it — so the function remains
+    callable at `/rest/v1/rpc/<fn>` with the site's public key. Measured on a real project: after
+    `REVOKE ... FROM anon, authenticated`, an anonymous RPC call to a `SECURITY DEFINER` function
+    that changed stock still returned **204**; adding `public` turned it into **401**. Same
+    cross-file union and dynamic-target skip as the rule above, so the common correct patterns —
+    `public` revoked on a separate line, in another migration, or in a `DO` loop — stay silent.
+    The fix is `REVOKE ALL ON FUNCTION f(...) FROM public, anon, authenticated` plus an explicit
+    `GRANT` only to the role that needs it.
   - `sql.search-path-missing-pg-temp` — `SECURITY DEFINER` function whose `SET search_path`
     **omits `pg_temp`**. This satisfies the Semgrep rule above and is still hijackable: when
     `pg_temp` is not named in the list, Postgres searches it **first** for RELATION names, so a

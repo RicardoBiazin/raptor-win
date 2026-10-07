@@ -1115,6 +1115,74 @@ class RevokeIncompletoTests(unittest.TestCase):
         self.assertEqual(len([a for a in achados if a["rule"] == REVOKE_INCOMPLETO]), 1)
 
 
+REVOKE_SEM_PUBLIC = "sql.supabase.revoke-sem-public"
+
+
+class RevokeSemPublicTests(unittest.TestCase):
+    """REVOKE que fecha anon/authenticated e esquece `public`.
+
+    O verdadeiro positivo foi medido: depois de `revoke ... from anon,
+    authenticated`, a RPC seguia respondendo 204 à chave pública — o EXECUTE
+    vinha de PUBLIC. Os falsos positivos a evitar são os padrões CORRETOS em
+    que o `public` está noutra linha, noutro arquivo ou num laço dinâmico.
+    """
+
+    def _rules(self, *arquivos: str) -> list[str]:
+        import sql_lint
+        with tempfile.TemporaryDirectory() as td:
+            caminhos = []
+            for i, sql in enumerate(arquivos):
+                f = Path(td) / f"{i:04d}_m.sql"
+                f.write_text(sql, encoding="utf-8")
+                caminhos.append(f)
+            return [a["rule"] for a in sql_lint.escanear(caminhos, set())]
+
+    def test_revoke_sem_public_acusa(self):
+        # O caso medido em produção.
+        self.assertIn(REVOKE_SEM_PUBLIC, self._rules(
+            "revoke all on function public.estoque_x(uuid, int) from anon, authenticated;\n"))
+
+    def test_revoke_so_de_authenticated_acusa(self):
+        # Quem revoga só do logado também continua liberado por PUBLIC.
+        self.assertIn(REVOKE_SEM_PUBLIC, self._rules(
+            "revoke execute on function public.fn_x(uuid) from authenticated;\n"))
+
+    def test_revoke_completo_nao_acusa(self):
+        self.assertNotIn(REVOKE_SEM_PUBLIC, self._rules(
+            "revoke all on function public.fn_x(uuid) from public, anon, authenticated;\n"))
+
+    def test_public_em_outra_linha_nao_acusa(self):
+        # Padrão comum: um revoke por papel, em linhas separadas.
+        self.assertNotIn(REVOKE_SEM_PUBLIC, self._rules(
+            "revoke execute on function app.fn_x(uuid, text, text) from public;\n"
+            "revoke execute on function app.fn_x(uuid, text, text) from authenticated;\n"
+            "grant  execute on function app.fn_x(uuid, text, text) to service_role;\n"))
+
+    def test_public_em_outro_arquivo_nao_acusa(self):
+        self.assertNotIn(REVOKE_SEM_PUBLIC, self._rules(
+            "revoke execute on function fn_x(uuid) from anon;\n",
+            "revoke execute on function public.fn_x(uuid) from public;\n"))
+
+    def test_laco_dinamico_nao_acusa(self):
+        # A identidade da função não é conhecível por regex.
+        self.assertNotIn(REVOKE_SEM_PUBLIC, self._rules(
+            "do $$ declare r record; begin\n"
+            "  for r in select oid::regprocedure as sig from pg_proc loop\n"
+            "    execute format('revoke execute on function %s from anon', r.sig);\n"
+            "  end loop; end $$;\n"))
+
+    def test_grant_deliberado_ao_mesmo_papel_nao_acusa(self):
+        self.assertNotIn(REVOKE_SEM_PUBLIC, self._rules(
+            "revoke execute on function public.fn_x(uuid) from anon;\n"
+            "grant  execute on function public.fn_x(uuid) to anon;\n"))
+
+    def test_nao_duplica_a_regra_irma(self):
+        # Fechou public e anon, esqueceu authenticated: isso é a OUTRA regra.
+        regras = self._rules("revoke execute on function public.fn_x(uuid) from public, anon;\n")
+        self.assertNotIn(REVOKE_SEM_PUBLIC, regras)
+        self.assertIn(REVOKE_INCOMPLETO, regras)
+
+
 class SupabasePatTests(unittest.TestCase):
     def test_pat_detectado(self):
         import secrets_scan
