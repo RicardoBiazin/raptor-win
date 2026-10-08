@@ -1820,7 +1820,12 @@ class _BaseRegras(unittest.TestCase):
         saida = subprocess.run(
             [self.semgrep, "--config", str(self.REGRAS / yaml_rel), "--json",
              "--metrics=off", "--quiet", str(d)],
-            capture_output=True, text=True, timeout=180, env=env)
+            # `encoding` explicito: sem ele o Windows decodifica a saida em
+            # cp1252 e estoura UnicodeDecodeError na primeira mensagem de regra
+            # com acento -- foi o que aconteceu ao ligar as regras de PHP do
+            # upstream. O `run_semgrep` do scanner ja' fazia isso; o teste nao.
+            capture_output=True, text=True, timeout=180, env=env,
+            encoding="utf-8", errors="replace")
         self.assertTrue(saida.stdout.strip(),
                         f"semgrep não produziu saída: {saida.stderr[:300]}")
         dados = json.loads(saida.stdout)
@@ -2606,28 +2611,38 @@ services:
 """, ".yml")
         self.assertEqual(achados, set())
 
-    def test_php_desserializacao_e_inclusao(self):
-        achados = self._rodar("linguagens/php-ruby.yaml",
-            "<?php\n$o = unserialize($_POST['d']);\ninclude($_GET['p']);\n", ".php")
-        self.assertEqual(achados, {"php-unserialize-de-entrada",
-                                   "php-include-de-entrada"})
+    def test_php_agora_vem_do_upstream(self):
+        """As minhas duas regras de PHP sairam em 07/10/2026: o upstream do
+        RAPTOR passou a trazer uma pasta `php/` com 14 regras, inclusive
+        `unserialize-taint.request-data` e `include-injection.request-path`.
 
-    def test_php_com_json_e_lista_fixa_fica_calado(self):
-        achados = self._rodar("linguagens/php-ruby.yaml",
-            "<?php\n$o = json_decode($_POST['d'], true);\n"
-            "$paginas = ['home' => 'home.php'];\n"
-            "$k = $_GET['p'] ?? 'home';\n"
-            "if (isset($paginas[$k])) { include($paginas[$k]); }\n", ".php")
-        self.assertEqual(achados, set())
+        Medido com as duas fontes ligadas: 4 achados para 2 defeitos -- o dobro
+        exato. Regra duplicada nao e' cobertura dobrada, e' ruido: o mesmo
+        defeito aparece duas vezes, a contagem de severidade infla, e quem le'
+        passa a desconfiar do numero. E as do upstream sao TAINT, enquanto as
+        minhas eram casamento de padrao.
+
+        Este teste trava a troca: se o upstream deixar de cobrir PHP numa
+        sincronizacao futura, ele reprova e avisa que a lacuna voltou.
+        """
+        # `_rodar` resolve o caminho a partir de `rules/raptorwin`, entao
+        # `../raptor/php` aponta para a pasta que veio do upstream.
+        achados = self._rodar("../raptor/php", """<?php
+$o = unserialize($_POST['d']);
+include($_GET['p']);
+""", ".php")
+        self.assertIn("request-data", achados, achados)   # unserialize-taint
+        self.assertIn("request-path", achados, achados)   # include-injection
+
 
     def test_ruby_yaml_load_e_send(self):
-        achados = self._rodar("linguagens/php-ruby.yaml",
+        achados = self._rodar("linguagens/ruby.yaml",
             "class C\n  def f\n    d = YAML.load(params[:conf])\n"
             "    @obj.send(params[:acao])\n  end\nend\n", ".rb")
         self.assertEqual(achados, {"ruby-yaml-load-inseguro", "ruby-send-dinamico"})
 
     def test_ruby_safe_load_e_lista_fixa_fica_calado(self):
-        achados = self._rodar("linguagens/php-ruby.yaml",
+        achados = self._rodar("linguagens/ruby.yaml",
             "class C\n  PERMITIDO = %w[listar].freeze\n  def f\n"
             "    d = YAML.safe_load(params[:conf])\n"
             "    a = params[:acao]\n"

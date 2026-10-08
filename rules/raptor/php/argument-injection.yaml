@@ -1,0 +1,65 @@
+rules:
+  # CWE-88: argument injection — request data lands inside a shell
+  # command string with no per-argument quoting. escapeshellcmd is
+  # deliberately NOT a sanitizer: it neutralizes shell metacharacters
+  # for the command as a whole but leaves spaces and leading dashes
+  # untouched, so a value placed in argument position can still smuggle
+  # extra options/arguments ("-oProxyCommand=...", "--include=/etc/*").
+  # Only escapeshellarg (single argument, fully quoted) or a numeric
+  # cast neutralizes argument boundaries.
+  #
+  # Known FP modes:
+  #   - Values validated by means the rule cannot see (ctype_alnum
+  #     guard, preg_match allowlist in an early-return branch) still
+  #     fire — guard-shaped validation is invisible to taint mode.
+  #   - Overlaps CWE-78 command injection on purpose: an unquoted
+  #     tainted value is both; reviews emitting either class get a
+  #     verifying chain.
+  # Known FN modes:
+  #   - escapeshellarg clears taint, but a quoted standalone value in
+  #     OPTION position ("-oProxyCommand=...") is still argument
+  #     injection when the program treats leading-dash words as
+  #     options — the sanitizer neutralizes word splitting, not the
+  #     callee's option parsing. Stated residual, not expressible
+  #     without knowing the callee's argv contract.
+  #   - Taint through helper indirection (a getter function wrapping
+  #     the superglobal read) is invisible to single-function taint.
+  - id: raptor.php.argument-injection.exec-family
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: >
+      Request data is concatenated into a shell command string without
+      escapeshellarg. Even under escapeshellcmd, spaces and leading
+      dashes survive, so the attacker can append extra arguments or
+      options to the invoked program (argument injection). Quote each
+      value with escapeshellarg or avoid the shell (proc_open with an
+      argument array).
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET[...]
+          - pattern: $_POST[...]
+          - pattern: $_REQUEST[...]
+          - pattern: $_COOKIE[...]
+    pattern-sanitizers:
+      - pattern: escapeshellarg(...)
+      - pattern: intval(...)
+      - pattern: (int) $X
+      - pattern: (float) $X
+    pattern-sinks:
+      - pattern: exec(...)
+      - pattern: system(...)
+      - pattern: passthru(...)
+      - pattern: shell_exec(...)
+      - pattern: popen(...)
+      # proc_open with an argv ARRAY bypasses the shell entirely (no
+      # word splitting, no metacharacters) — it is this rule's own
+      # recommended remediation and must not fire. Only the
+      # string-command form is a sink; the other sink functions are
+      # string-only by signature.
+      - patterns:
+          - pattern: proc_open($CMD, ...)
+          - pattern-not: proc_open([...], ...)
+          - pattern-not: proc_open(array(...), ...)
+    metadata:
+      cwe: ["CWE-88"]

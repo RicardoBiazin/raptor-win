@@ -1,0 +1,52 @@
+rules:
+  # CWE-502: deserialization of untrusted data — request data reaching
+  # unserialize() with no class restriction. A serialized object
+  # string instantiates any autoloadable class, so magic methods
+  # (__wakeup/__destruct/__toString) on any loaded gadget run with
+  # attacker-chosen properties. Direct superglobal arguments, nested
+  # array-field reads, and single-assignment hops are all in scope
+  # (intraprocedural taint); decoding wrappers (base64_decode and
+  # friends) propagate taint through to the sink; the fully-qualified
+  # (\unserialize) and error-suppressed (@unserialize) spellings
+  # match.
+  #
+  # Two-arg calls: the options form is matched ONLY in its cheapest
+  # dangerous spelling — a literal 'allowed_classes' => true (any
+  # bracket syntax, extra keys allowed). 'allowed_classes' => false
+  # is this rule's own recommended remediation and stays silent.
+  #
+  # Known FP modes:
+  #   - Integrity checks the rule cannot see (an hash_equals/HMAC
+  #     guard branch before the call, a preg_match shape check) still
+  #     fire — guard-shaped validation is invisible to taint mode.
+  # Scope pins: taint is single-function, and options arrays
+  #   participate only in the literal-true spelling above. The
+  #   negative fixture carries out-of-scope shape pins for both
+  #   boundaries — each flips when a matching shape lands.
+  - id: raptor.php.unserialize-taint.request-data
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: >
+      Request data reaches unserialize() with no class restriction. A
+      serialized-object payload instantiates any autoloadable class
+      and its magic methods run with attacker-chosen properties
+      (object injection). Pass a strict class allowlist
+      (unserialize($v, ['allowed_classes' => false])) or move the
+      format to json_decode.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET[...]
+          - pattern: $_POST[...]
+          - pattern: $_REQUEST[...]
+          - pattern: $_COOKIE[...]
+    pattern-sinks:
+      - pattern-either:
+          - pattern: unserialize($DATA)
+          - pattern: \unserialize($DATA)
+          - pattern: unserialize($DATA, [..., 'allowed_classes' => true, ...])
+          - pattern: \unserialize($DATA, [..., 'allowed_classes' => true, ...])
+          - pattern: unserialize($DATA, array(..., 'allowed_classes' => true, ...))
+          - pattern: \unserialize($DATA, array(..., 'allowed_classes' => true, ...))
+    metadata:
+      cwe: ["CWE-502"]
