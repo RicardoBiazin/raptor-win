@@ -969,6 +969,24 @@ class GuardaNullUidTests(MultiArquivoMixin, unittest.TestCase):
         self.assertNotIn(GUARDA_NULL, self._rules(
             DEF % ("", "set search_path = public, pg_temp", corpo)))
 
+    def test_raise_no_else_e_a_guarda_do_caminho_sem_sessao(self):
+        # Falso positivo medido: o THEN só escolhe a identidade; o ELSE (sem
+        # sessão) é que exige o dado e levanta a exceção. O caminho sem sessão
+        # PASSA por verificação — acusar ensinaria a ignorar a regra.
+        corpo = ("if auth.uid() is not null then v_ident := 'uid:' || auth.uid()::text; "
+                 "else if length(v_fone) < 10 then raise exception 'telefone'; end if; "
+                 "v_ident := 'fone:' || v_fone; end if;")
+        self.assertNotIn(GUARDA_NULL, self._rules(
+            DEF % ("", "set search_path = public, pg_temp", corpo)))
+
+    def test_raise_no_then_depois_de_atribuicao_ainda_acusa(self):
+        # A trava do else não pode esconder o verdadeiro positivo: a exceção
+        # continua dentro do then, só que depois de outra instrução.
+        corpo = ("if auth.uid() is not null then v_x := 1; "
+                 "if not is_admin() then raise exception 'nao'; end if; end if;")
+        self.assertIn(GUARDA_NULL, self._rules(
+            DEF % ("", "set search_path = public, pg_temp", corpo)))
+
 
 class ExecuteNuncaFechadoTests(MultiArquivoMixin, unittest.TestCase):
     """DEFINER que nenhum grant/revoke cita — no Supabase nasce aberta a `anon`.
@@ -1959,6 +1977,20 @@ class TestTabelaSemRLS(unittest.TestCase):
 
     def _acusadas(self, arquivos: dict) -> set:
         return {a["message"].split("`")[1] for a in self._rodar(arquivos)}
+
+    def test_create_table_dentro_de_string_nao_e_tabela(self):
+        # Falso positivo medido num schema gerado: a lista de tags de um event
+        # trigger do Supabase traz 'CREATE TABLE AS' entre aspas, e virava
+        # "tabela `AS` criada sem RLS" (HIGH).
+        sql = ("create or replace function public.rls_auto_enable() returns event_trigger "
+               "language plpgsql as $$ begin\n"
+               "  perform 1 where tg_tag in ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO');\n"
+               "end $$;\n")
+        self.assertEqual(self._acusadas({"m.sql": sql}), set())
+
+    def test_tabela_de_verdade_continua_acusada_mesmo_com_string_ao_lado(self):
+        sql = ("create table public.segredos (id uuid primary key, nota text default 'create table x');\n")
+        self.assertEqual(self._acusadas({"m.sql": sql}), {"public.segredos"})
 
     def test_tabela_sem_rls_e_acusada(self):
         """No Supabase nao e' descuido de configuracao, e' exposicao: o

@@ -399,7 +399,14 @@ _RE_SESSAO = re.compile(
 # Guarda cuja CONDIÇÃO exige sessão: sem uid, o `raise` nunca acontece.
 _RE_GUARDA_NULL_UID = re.compile(
     r"\bif\b[^;]{0,240}?auth\.uid\s*\(\s*\)\s+is\s+not\s+null"
-    r"[^;]{0,240}?\bthen\b.{0,400}?\braise\s+exception\b",
+    # A exceção tem de estar no ramo THEN: o trecho entre o `then` e o `raise`
+    # não pode atravessar `else`, `elsif` nem `end if`. Sem esta trava, um
+    # `raise` no ELSE — que é justamente a guarda do caminho SEM sessão —
+    # contava como se estivesse no then, e a regra acusava a função que faz o
+    # certo. Medido: "se logado, identifica pelo uid; senão, exige telefone
+    # válido e levanta exceção" saía como "o caminho sem sessão não passa por
+    # verificação", quando é ele que passa.
+    r"[^;]{0,240}?\bthen\b(?:(?!\belse\b|\belsif\b|\bend\s+if\b).){0,400}?\braise\s+exception\b",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -864,8 +871,24 @@ def _rls_por_laco(texto: str) -> set:
     return cobertas
 
 
+def _sem_literais(texto: str) -> str:
+    """Troca o conteúdo de cada literal entre aspas simples por espaços.
+
+    Mesmo comprimento e mesmas quebras de linha — os números de linha dos
+    achados continuam certos. Texto entre aspas é DADO, não comando: um
+    `'CREATE TABLE AS'` dentro de um corpo de função (a lista de tags de evento
+    de um event trigger, por exemplo) virava "tabela `AS` criada sem RLS", HIGH.
+    """
+    return re.sub(r"'(?:[^']|'')*'",
+                  lambda m: "".join("\n" if c == "\n" else " " for c in m.group(0)),
+                  texto)
+
+
 def _coletar_rls(texto: str, rel: str, criadas: dict, com_rls: set) -> None:
-    for m in _CREATE_TABLE.finditer(texto):
+    # Só a busca de CREATE TABLE ignora literais. O `enable row level security`
+    # continua lido do texto inteiro: ele aparece dentro de blocos `do` (fora
+    # de aspas), e o laço dinâmico tem tratamento próprio em `_rls_por_laco`.
+    for m in _CREATE_TABLE.finditer(_sem_literais(texto)):
         alvo = m.group(1)
         if _schema_de(alvo) in _SCHEMAS_INTERNOS:
             continue
