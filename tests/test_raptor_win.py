@@ -1215,7 +1215,6 @@ class SupabasePatTests(unittest.TestCase):
         import secrets_scan
         self.assertFalse(any(r.re.search("sbp_curto") for r in secrets_scan.REGRAS))
 
-
 if __name__ == "__main__":
     unittest.main()
 
@@ -2679,4 +2678,233 @@ include($_GET['p']);
             "    d = YAML.safe_load(params[:conf])\n"
             "    a = params[:acao]\n"
             "    @obj.public_send(a) if PERMITIDO.include?(a)\n  end\nend\n", ".rb")
+        self.assertEqual(achados, set())
+
+
+# ---------------------------------------------------------------------------
+# Imports remotos do Deno (Edge Functions): SCA e versao nao fixada
+# ---------------------------------------------------------------------------
+
+class TestImportsDeno(unittest.TestCase):
+    def _projeto(self, arquivos: dict) -> Path:
+        d = Path(tempfile.mkdtemp())
+        for rel, txt in arquivos.items():
+            p = d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(txt, encoding="utf-8")
+        return d
+
+    def test_le_esm_sh_npm_e_escopo(self):
+        texto = (
+            "import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'\n"
+            "import Stripe from 'npm:stripe@14.1.0'\n"
+            "import x from \"https://esm.sh/v135/lodash@4.17.20/es2022/lodash.mjs\"\n"
+            "import y from 'https://cdn.jsdelivr.net/npm/zod@3.22.4/+esm'\n")
+        got = {(n, v) for n, v, _l, _e in supply_chain.imports_deno(texto)}
+        self.assertEqual(got, {("@supabase/supabase-js", "2.45.0"), ("stripe", "14.1.0"),
+                               ("lodash", "4.17.20"), ("zod", "3.22.4")})
+
+    def test_versao_que_nao_e_exata_volta_vazia(self):
+        """`@2` e `@^2.45` nao dizem que versao roda: para o OSV so' versao
+        exata responde, e para o achado local e' exatamente o problema."""
+        texto = ("import a from 'https://esm.sh/@supabase/supabase-js@2'\n"
+                 "import b from 'npm:jose@^5.2'\n"
+                 "import c from 'npm:hono'\n")
+        got = {(n, v) for n, v, _l, _e in supply_chain.imports_deno(texto)}
+        self.assertEqual(got, {("@supabase/supabase-js", ""), ("jose", ""), ("hono", "")})
+
+    def test_so_olha_supabase_functions_e_mapas_do_deno(self):
+        self.assertTrue(supply_chain.e_fonte_deno(Path("x/supabase/functions/f/index.ts")))
+        self.assertTrue(supply_chain.e_fonte_deno(Path("x/deno.json")))
+        self.assertTrue(supply_chain.e_fonte_deno(Path("import_map.json")))
+        # import de CDN em codigo de navegador e' outra conversa
+        self.assertFalse(supply_chain.e_fonte_deno(Path("x/src/app.ts")))
+        self.assertFalse(supply_chain.e_fonte_deno(Path("x/supabase/migracao.sql")))
+
+    def test_sem_versao_exata_e_acusado_com_linha(self):
+        d = self._projeto({"supabase/functions/f/index.ts":
+                           "// x\nimport { createClient } from 'https://esm.sh/@supabase/supabase-js@2'\n"})
+        a = [x for x in supply_chain.escanear([d], raptor_win.SKIP_DIRS)
+             if x["rule"] == "supply.deno-import-sem-versao-exata"]
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0]["line"], 2)
+
+    def test_versao_exata_ou_deno_lock_nao_sao_acusados(self):
+        d = self._projeto({
+            "supabase/functions/f/index.ts": "import 'npm:@supabase/supabase-js@2.117.3'\n",
+            "outro/supabase/functions/g/index.ts": "import 'https://esm.sh/hono@4'\n",
+            "outro/deno.lock": "{}",
+        })
+        regras = {x["rule"] for x in supply_chain.escanear([d], raptor_win.SKIP_DIRS)}
+        self.assertNotIn("supply.deno-import-sem-versao-exata", regras)
+
+    def test_sca_enxerga_os_imports_da_edge_function(self):
+        """O ponto da mudanca: sem isto, a dependencia escrita no import nao
+        entra em npm audit, Dependabot nem OSV -- 0 dependencias, tudo verde."""
+        d = self._projeto({
+            "supabase/functions/admin/index.ts":
+                "import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'\n",
+            "supabase/functions/_shared/util.ts": "export const x = 1\n",
+        })
+        manifestos = raptor_win.find_manifests([d])
+        self.assertTrue(any(p.name == "index.ts" for p in manifestos))
+        self.assertEqual(raptor_win.parse_deno_imports(d / "supabase/functions/admin/index.ts"),
+                         [("npm", "@supabase/supabase-js", "2.45.0")])
+
+    def test_arquivo_de_funcao_sem_import_nao_vira_manifesto_vazio(self):
+        """`_shared/util.ts` sem import remoto e' o comum. Ir para `vazios`
+        diria no relatorio que ha' um manifesto que nao soube ler."""
+        d = self._projeto({"supabase/functions/_shared/util.ts": "export const x = 1\n"})
+        res = raptor_win.run_sca([d])
+        self.assertEqual(res.get("vazios", []), [])
+        self.assertEqual(res.get("deps"), 0)
+
+
+# ---------------------------------------------------------------------------
+# Storage: bucket publico sem limite de tipo/tamanho (db_audit)
+# ---------------------------------------------------------------------------
+
+class TestDbBuckets(unittest.TestCase):
+    def _b(self, **kw):
+        base = {"bucket": "fotos", "publico": True, "sem_limite_tamanho": False,
+                "sem_tipos": False, "tipos": "image/jpeg,image/png"}
+        base.update(kw)
+        return base
+
+    def _regras(self, linhas):
+        return {a["rule"] for a in db_audit._achados_buckets(linhas)}
+
+    def test_publico_sem_tipo_e_sem_teto(self):
+        self.assertEqual(self._regras([self._b(sem_tipos=True, tipos="", sem_limite_tamanho=True)]),
+                         {"db.storage-bucket-publico-sem-tipo", "db.storage-bucket-publico-sem-teto"})
+
+    def test_svg_ou_curinga_e_tipo_ativo(self):
+        for tipos in ("image/png,image/svg+xml", "*/*", "text/html"):
+            with self.subTest(tipos=tipos):
+                self.assertEqual(self._regras([self._b(tipos=tipos)]),
+                                 {"db.storage-bucket-publico-tipo-ativo"})
+
+    def test_publico_bem_configurado_e_privado_nao_sao_acusados(self):
+        self.assertEqual(self._regras([self._b()]), set())
+        self.assertEqual(self._regras([self._b(publico=False, sem_tipos=True,
+                                               sem_limite_tamanho=True)]), set())
+
+    def test_so_consulta_buckets_quando_o_preflight_achou_storage(self):
+        """Postgres sem Supabase nao tem `storage.buckets`: consultar ERRARIA e
+        derrubaria a auditoria inteira."""
+        banco = FalsoBanco({"buckets": [self._b(sem_tipos=True, tipos="")]})
+        a = db_audit.escanear(banco, capacidades={"tem_anon": True, "tem_auth": True})
+        self.assertEqual(len(banco.vistas), 4)
+        self.assertNotIn("db.storage-bucket-publico-sem-tipo", {x["rule"] for x in a})
+        cap = {"tem_anon": True, "tem_auth": True, "tem_storage": True}
+        banco = FalsoBanco({"buckets": [self._b(sem_tipos=True, tipos="")]}, cap)
+        a = db_audit.escanear(banco, capacidades=cap)
+        self.assertEqual(len(banco.vistas), 5)
+        self.assertIn("db.storage-bucket-publico-sem-tipo", {x["rule"] for x in a})
+        self.assertTrue(all(x["path"].startswith("db:storage.") for x in a
+                            if x["rule"].startswith("db.storage")))
+
+
+# ---------------------------------------------------------------------------
+# Regras de CORS e de senha definida pelo administrador
+# ---------------------------------------------------------------------------
+
+class TestRegrasCors(_BaseRegras):
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "cors"
+    ARQ = "cors.yaml"
+
+    def test_origem_refletida_com_credenciais(self):
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async (req: Request) => {
+  const h = { 'Access-Control-Allow-Origin': req.headers.get('Origin') ?? '',
+              'Access-Control-Allow-Credentials': 'true' }
+  return new Response('x', { headers: h })
+})
+""", ".ts")
+        self.assertIn("origem-refletida-com-credenciais", achados)
+        self.assertNotIn("origem-refletida", achados)
+
+    def test_origem_refletida_sem_lista(self):
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async (req: Request) => {
+  const h = { 'Access-Control-Allow-Origin': req.headers.get('origin') ?? '' }
+  return new Response('x', { headers: h })
+})
+""", ".ts")
+        self.assertEqual(achados, {"origem-refletida"})
+
+    def test_origem_conferida_contra_lista_nao_e_acusada(self):
+        achados = self._rodar(self.ARQ, """
+const OK = new Set(['https://app.exemplo.com'])
+Deno.serve(async (req: Request) => {
+  const o = req.headers.get('Origin')
+  const h: Record<string, string> = { Vary: 'Origin' }
+  if (o && OK.has(o)) h['Access-Control-Allow-Origin'] = o
+  return new Response('x', { headers: h })
+})
+""", ".ts")
+        self.assertEqual(achados, set())
+
+    def test_curinga_so_e_apontado_em_funcao_administrativa(self):
+        """Com token Bearer, `*` nao vaza nada por si so' (o site terceiro nao
+        tem o token). Acusar todo `*` seria ruido; em funcao que administra
+        contas, vale o endurecimento -- como INFO."""
+        admin = self._rodar(self.ARQ, """
+const CORS = { 'Access-Control-Allow-Origin': '*' }
+Deno.serve(async (req: Request) => {
+  await fetch(`${URL}/auth/v1/admin/users`, { method: 'POST' })
+  return new Response('x', { headers: CORS })
+})
+""", ".ts")
+        self.assertEqual(admin, {"curinga-em-funcao-administrativa"})
+        publica = self._rodar(self.ARQ, """
+const CORS = { "Access-Control-Allow-Origin": "*" }
+Deno.serve(async (req: Request) => new Response('x', { headers: CORS }))
+""", ".ts")
+        self.assertEqual(publica, set())
+
+
+class TestRegraAdminDefineSenha(_BaseRegras):
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "supabase"
+    ARQ = "admin-define-senha-de-outro.yaml"
+
+    def test_senha_do_corpo_na_api_admin_por_fetch(self):
+        """A forma medida no codigo real: template literal na URL e a senha
+        passando por variavel e por `try`. Com `metavariable-regex` na URL a
+        regra nascia muda justamente aqui."""
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async (req: Request) => {
+  let c
+  try { c = await req.json() } catch { return new Response('', { status: 400 }) }
+  const senha = c.senha ?? ''
+  await fetch(`${URL_SB}/auth/v1/admin/users`, {
+    method: 'POST',
+    body: JSON.stringify({ email: c.email, password: senha, email_confirm: true }),
+  })
+})
+""", ".ts")
+        self.assertIn("admin-define-senha-de-outro", achados)
+
+    def test_senha_do_corpo_pelo_sdk(self):
+        achados = self._rodar(self.ARQ, """
+export async function f(admin, req) {
+  const body = await req.json()
+  await admin.auth.admin.updateUserById(body.id, { password: body.nova })
+}
+""", ".ts")
+        self.assertIn("admin-define-senha-de-outro", achados)
+
+    def test_senha_aleatoria_nao_e_acusada(self):
+        """A forma CORRETA tambem passa por variavel. Casar o valor acusava
+        esta -- por isso a regra e' de taint, pela origem."""
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async (req: Request) => {
+  const c = await req.json()
+  const senha = gerarSenhaAleatoria()
+  await fetch(`${URL_SB}/auth/v1/admin/users`, {
+    method: 'POST', body: JSON.stringify({ email: c.email, password: senha }),
+  })
+  await admin.auth.admin.createUser({ email: c.email, password: crypto.randomUUID() })
+})
+""", ".ts")
         self.assertEqual(achados, set())

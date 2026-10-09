@@ -604,16 +604,32 @@ def _e_workflow_gha(p: Path) -> bool:
 def find_manifests(targets: list[Path]) -> list[Path]:
     out: list[Path] = []
     for t in targets:
-        if t.is_file() and (_e_manifesto(t.name) or _e_workflow_gha(t)):
+        if t.is_file() and (_e_manifesto(t.name) or _e_workflow_gha(t)
+                            or supply_chain.e_fonte_deno(t)):
             out.append(t)
             continue
         if t.is_dir():
             for p in t.rglob("*"):
                 if any(x in SKIP_DIRS for x in p.parts) or not p.is_file():
                     continue
-                if _e_manifesto(p.name) or _e_workflow_gha(p):
+                if (_e_manifesto(p.name) or _e_workflow_gha(p)
+                        or supply_chain.e_fonte_deno(p)):
                     out.append(p)
     return out
+
+
+def parse_deno_imports(path: Path) -> list[tuple[str, str, str]]:
+    """Dependências escritas no import de Edge Function / mapa do Deno.
+
+    `esm.sh`, jsDelivr, unpkg e Skypack servem o pacote do npm com o nome e a
+    versão do npm, então a consulta ao OSV é a do ecossistema npm. Sem versão
+    exata, entra com versão vazia — conta em "sem pin", não some.
+    """
+    try:
+        texto = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [("npm", nome, ver) for nome, ver, _l, _e in supply_chain.imports_deno(texto)]
 
 
 def parse_requirements(path: Path) -> list[tuple[str, str, str]]:
@@ -1093,16 +1109,25 @@ def run_sca(targets: list[Path]) -> "dict | None":
             parser = parse_requirements
         if parser is None and _e_workflow_gha(m):
             parser = parse_gha_workflow
+        deno = parser is None and supply_chain.e_fonte_deno(m)
+        if deno:
+            parser = parse_deno_imports
         if parser is None:
             continue
         if m.name in ("package-lock.json", "npm-shrinkwrap.json"):
             diretas_npm |= diretas_do_package_lock(m)
         got = parser(m)
+        if deno and not got:
+            # Arquivo de função SEM import remoto (um `_shared/util.ts`) é o
+            # comum, não um manifesto que eu não soube ler: não vai a `vazios`.
+            continue
         if got:
             deps += got
             for dep in got:
                 dep_paths.setdefault(dep, str(m))
-            sources.append(m.name)
+            rotulo = "Deno (imports de Edge Function)" if deno else m.name
+            if not deno or rotulo not in sources:
+                sources.append(rotulo)
         else:
             # Manifesto que EXISTE e nao rendeu linha nenhuma. Descartar em
             # silencio -- ele nem entrava em `sources` -- e' o pior resultado

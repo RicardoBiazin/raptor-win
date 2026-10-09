@@ -181,7 +181,10 @@ _Q_PREFLIGHT = """
 select current_setting('server_version') as versao,
        coalesce(current_setting('transaction_read_only', true), 'off') as somente_leitura,
        exists (select 1 from pg_roles where rolname = 'anon') as tem_anon,
-       exists (select 1 from pg_roles where rolname = 'authenticated') as tem_auth
+       exists (select 1 from pg_roles where rolname = 'authenticated') as tem_auth,
+       exists (select 1 from information_schema.columns
+                where table_schema = 'storage' and table_name = 'buckets'
+                  and column_name = 'allowed_mime_types') as tem_storage
 """
 
 # `acldefault('f', proowner)` é essencial: `proacl IS NULL` significa privilégio
@@ -267,12 +270,27 @@ select e.extname as nome,
  where n.nspname = any (array[{EXPOSTOS}]::name[])
 """
 
+# Buckets do Storage do Supabase. `storage` é schema de plataforma e fica fora
+# das outras consultas — mas o que está NELE (tipo e tamanho aceitos por bucket)
+# é configuração do usuário, e não aparece em migração nenhuma quando foi feito
+# pelo painel. Só roda se o preflight achou a tabela COM as colunas de limite.
+_Q_BUCKETS = """
+select b.id as bucket,
+       b.public as publico,
+       b.file_size_limit is null as sem_limite_tamanho,
+       (b.allowed_mime_types is null
+        or cardinality(b.allowed_mime_types) = 0) as sem_tipos,
+       coalesce(array_to_string(b.allowed_mime_types, ','), '') as tipos
+  from storage.buckets b
+"""
+
 CONSULTAS: dict[str, str] = {
     "preflight": _Q_PREFLIGHT,
     "funcoes": _Q_FUNCOES,
     "relacoes": _Q_RELACOES,
     "policies": _Q_POLICIES,
     "extensoes": _Q_EXTENSOES,
+    "buckets": _Q_BUCKETS,
 }
 
 
@@ -614,6 +632,64 @@ def _achados_extensoes(linhas: list) -> list[dict]:
     return out
 
 
+# Tipos que o navegador EXECUTA ou interpreta como documento quando servidos
+# do bucket: um upload deles vira página/script hospedado no domínio do
+# Storage. Imagem raster, PDF, vídeo e áudio não estão aqui.
+_TIPOS_ATIVOS = ("text/html", "image/svg+xml", "application/xhtml+xml",
+                 "text/xml", "application/xml", "application/javascript",
+                 "text/javascript")
+
+
+def _achados_buckets(linhas: list) -> list[dict]:
+    """Bucket PÚBLICO sem restrição de tipo, com tipo ativo, ou sem teto."""
+    out: list[dict] = []
+    for r in linhas or []:
+        nome = _txt(r.get("bucket"))
+        if not _bool(r.get("publico")):
+            # Privado: o download passa pela RLS de storage.objects. O tipo
+            # ainda importa, mas o arquivo não fica servido para qualquer um.
+            continue
+        alvo = _pseudo("storage", nome)
+        tipos = [t.strip().lower() for t in _txt(r.get("tipos")).split(",") if t.strip()]
+        ativos = [t for t in tipos
+                  if t in _TIPOS_ATIVOS or t in ("*/*", "*", "text/*", "application/*")]
+        if _bool(r.get("sem_tipos")):
+            out.append({
+                "rule": "db.storage-bucket-publico-sem-tipo",
+                "severity": "MEDIUM", "context": "db · storage", "path": alvo, "line": 0,
+                "message": (
+                    f"O bucket PÚBLICO `{nome}` aceita qualquer tipo de arquivo. "
+                    f"Quem tem permissão de upload (uma conta comprometida "
+                    f"basta) hospeda ali `.html` ou `.svg` com script, servido "
+                    f"por URL pública no domínio do Storage — página de phishing "
+                    f"com endereço de confiança, ou malware. Defina "
+                    f"`allowed_mime_types` só com os tipos que o app sobe "
+                    f"(ex.: `image/jpeg, image/png, image/webp`)."),
+            })
+        elif ativos:
+            out.append({
+                "rule": "db.storage-bucket-publico-tipo-ativo",
+                "severity": "MEDIUM", "context": "db · storage", "path": alvo, "line": 0,
+                "message": (
+                    f"O bucket PÚBLICO `{nome}` aceita {', '.join(ativos)}: tipo "
+                    f"que o navegador interpreta como documento ou script. Um "
+                    f"upload desses vira página servida por URL pública do "
+                    f"Storage. Se o app precisa de SVG, sirva-o rasterizado ou "
+                    f"com `Content-Disposition: attachment`."),
+            })
+        if _bool(r.get("sem_limite_tamanho")):
+            out.append({
+                "rule": "db.storage-bucket-publico-sem-teto",
+                "severity": "LOW", "context": "db · storage", "path": alvo, "line": 0,
+                "message": (
+                    f"O bucket PÚBLICO `{nome}` não tem `file_size_limit`: vale o "
+                    f"teto global do projeto (dezenas de MB por arquivo). Um teto "
+                    f"do tamanho do que o app realmente sobe limita o custo de "
+                    f"cota e de banda que um upload abusivo gera."),
+            })
+    return out
+
+
 def preflight(consultar: Consulta) -> dict:
     """Capacidades do banco. NADA daqui entra em relatório.
 
@@ -627,6 +703,7 @@ def preflight(consultar: Consulta) -> dict:
         "somente_leitura": _txt(r.get("somente_leitura")).lower() in ("on", "t", "true"),
         "tem_anon": _bool(r.get("tem_anon")),
         "tem_auth": _bool(r.get("tem_auth")),
+        "tem_storage": _bool(r.get("tem_storage")),
     }
 
 
@@ -646,10 +723,13 @@ def escanear(consultar: Consulta, *,
         for s in schemas_incluidos:
             _ident(s)          # valida antes de qualquer coisa
     achados: list[dict] = []
-    for chave, handler in (("funcoes", _achados_funcoes),
-                           ("relacoes", _achados_relacoes),
-                           ("policies", _achados_policies),
-                           ("extensoes", _achados_extensoes)):
+    etapas = [("funcoes", _achados_funcoes),
+              ("relacoes", _achados_relacoes),
+              ("policies", _achados_policies),
+              ("extensoes", _achados_extensoes)]
+    if cap.get("tem_storage"):
+        etapas.append(("buckets", _achados_buckets))
+    for chave, handler in etapas:
         sql = montar(chave, schemas=schemas_excluidos, capacidades=cap)
         _exigir_somente_leitura(sql)
         achados += handler(consultar(sql))

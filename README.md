@@ -124,6 +124,16 @@ Windows launcher (puts `semgrep` on PATH automatically):
   "all clear". `raptor-win` therefore queries by **name**, then compares the ref locally. A ref it
   cannot order (a SHA pin, a branch) or a floating major tag whose fix lands inside the same major
   is reported as **needs review**, never as clean.
+
+  SCA also reads **Deno remote imports** in Supabase Edge Functions (`supabase/functions/**`) and in
+  `deno.json` / `import_map.json`: `https://esm.sh/pkg@x.y.z`, `npm:pkg@x.y.z`, jsDelivr, unpkg and
+  Skypack. An Edge Function has no `package.json` — the dependency is written in the import line,
+  so `npm audit` and Dependabot never see it. Measured on a real project: `supabase-js` sat 70
+  versions behind in three functions, invisible to every tool the project ran. These are queried
+  as `npm` packages; an import without an exact version counts as unpinned. Independently of
+  `--sca` (no network), `supply.deno-import-sem-versao-exata` (**MEDIUM**) flags such an import
+  when there is no `deno.lock`: every deploy resolves whatever version matches, so production code
+  changes without the repository changing.
 - **CI and containers** — the RAPTOR rule set has *no* infrastructure rules at all
   (checked: zero files declaring `yaml`, `dockerfile`, `terraform` or `hcl`), and this tool sent
   no Registry pack for `.yml`/`.yaml` either. That was a blind spot covering the whole CI surface.
@@ -243,6 +253,12 @@ Windows launcher (puts `semgrep` on PATH automatically):
     network-capable extension (`pg_net`, `http`, `dblink`, …), **measured in the catalog**. HIGH only
     when those functions live in a published schema, because holding EXECUTE is not the same as
     being callable through the API.
+  - `db.storage-bucket-publico-sem-tipo` / `-tipo-ativo` (**MEDIUM**) and `-sem-teto` (**LOW**) — a
+    **public** Storage bucket with no `allowed_mime_types` (or one that allows `text/html`,
+    `image/svg+xml`, `*/*`…) or no `file_size_limit`. Anyone with upload rights — one compromised
+    account is enough — can host a script-bearing page under the Storage domain. Bucket limits are
+    usually set in the dashboard, so no migration shows them; only runs when the preflight finds
+    `storage.buckets` with those columns, so a plain Postgres is not queried for a table it lacks.
 
   **Noise is the whole game here.** Objects owned by an extension (`pg_depend.deptype = 'e'`), by a
   platform role (`supabase_admin` and friends), trigger functions, `pg_*` schemas, and `search_path`
@@ -367,6 +383,26 @@ Static analysis reports *possibilities*; you still validate exploitability.
     that a `SET search_path` **exist**, so `= public` passes here and is still hijackable.
   - `supabase/grant-execute-anon-public` — `EXECUTE` on a function granted to `anon`/`PUBLIC`, making
     it callable unauthenticated via the REST RPC API; risky when the function is `SECURITY DEFINER`.
+  - `supabase/admin-define-senha-de-outro` (**WARNING**, taint) — a password that comes from the
+    request body reaches the Auth admin API (`auth.admin.createUser` / `updateUserById`, or `fetch`
+    to `/auth/v1/admin/users`): an administrator chooses someone else's password. Nothing leaks at
+    that moment; what breaks is **non-repudiation** — a password two people know no longer proves
+    who did what, and audit trails (who voided an item, who closed the till) rely on it. Taint by
+    *origin* rather than value matching, because the correct pattern (`const senha =
+    gerarSenhaAleatoria()`) also goes through a variable. Fix: random password + invite/recovery
+    code. The URL is matched with `metavariable-pattern` in generic mode — `metavariable-regex` does
+    not match inside a template literal, which is the common shape (`${URL}/auth/v1/admin/users`).
+  - `cors/origem-refletida-com-credenciais` (**ERROR**), `cors/origem-refletida` (**WARNING**),
+    `cors/curinga-em-funcao-administrativa` (**INFO**). Calibrated on a real reasoning error: an
+    admin Edge Function answering `Access-Control-Allow-Origin: *` looked like "any site can call
+    it with the admin's token". It cannot — a Bearer token lives in the app origin's localStorage,
+    and a third-party site neither reads it nor gets it attached by the browser. What leaks is a
+    credential the browser attaches **by itself** (a session cookie) combined with an open origin:
+    so the reflected `Origin` + `Allow-Credentials: true` pair is ERROR, a reflected origin without
+    an allowlist is WARNING (it becomes the ERROR the day someone switches to cookies), and `*` is
+    reported only in files that administer Auth accounts, as hardening. `*` +
+    `Allow-Credentials` is **not** reported: browsers reject that combination, so it is a
+    functional bug, not a leak.
   - `supabase/rls-init-auth-uid` — performance: RLS policy calls `auth.uid()`/`auth.role()`/`auth.jwt()`
     directly (re-evaluated per row); wrap as `(select auth.uid())` so the planner caches it.
 - `sql_lint.py` — cross-statement SQL checks that Semgrep (one match per snippet) can't correlate,

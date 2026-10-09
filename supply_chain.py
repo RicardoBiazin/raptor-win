@@ -180,6 +180,100 @@ def _achados_do_requirements(caminho: Path, rel: str) -> list[dict]:
 _LOCKS_NPM = ("package-lock.json", "npm-shrinkwrap.json")
 
 
+# ---------------------------------------------------------------------------
+# Imports remotos do Deno (Supabase Edge Functions)
+# ---------------------------------------------------------------------------
+# Uma Edge Function não tem package.json nem lockfile do npm: a dependência
+# está ESCRITA NO IMPORT (`https://esm.sh/@supabase/supabase-js@2.45.0`,
+# `npm:stripe@14.0.0`). O `npm audit` não a enxerga, o Dependabot não a
+# atualiza e, sem esta leitura, a SCA também não — medido num projeto real com
+# o supabase-js parado 70 versões atrás nas três funções, invisível a todas as
+# ferramentas que o projeto rodava.
+#
+# Onde procurar: arquivo de código sob `supabase/functions/` (a convenção da
+# CLI) e os mapas de import do Deno (`deno.json`, `import_map.json`). Fora
+# disso um `https://esm.sh/...` costuma ser import de navegador em HTML, que é
+# outra conversa.
+_RE_IMPORT_DENO = re.compile(
+    r"""(?:
+          https?://(?:esm\.sh|cdn\.jsdelivr\.net/npm|unpkg\.com|cdn\.skypack\.dev)/
+            (?:v\d+/|stable/)?
+        | npm:
+        )
+        (?P<nome>@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*|[a-z0-9][\w.-]*)
+        (?:@(?P<versao>[^/'"`\s?#&]+))?""",
+    re.I | re.X)
+_RE_VERSAO_EXATA = re.compile(r"^v?\d+\.\d+\.\d+(?:-[\w.]+)?$")
+_SUFIXOS_DENO = (".ts", ".tsx", ".js", ".mjs", ".jsx", ".mts")
+MAPAS_DENO = ("deno.json", "deno.jsonc", "import_map.json")
+
+
+def e_fonte_deno(p: Path) -> bool:
+    """Código de Edge Function do Supabase, ou mapa de import do Deno."""
+    if p.name in MAPAS_DENO:
+        return True
+    partes = [x.lower() for x in p.parts]
+    if p.suffix.lower() not in _SUFIXOS_DENO:
+        return False
+    for i in range(len(partes) - 1):
+        if partes[i] == "supabase" and partes[i + 1] == "functions":
+            return True
+    return False
+
+
+def imports_deno(texto: str) -> list[tuple[str, str, int, str]]:
+    """(nome, versão exata ou '', linha, especificador) de cada import remoto.
+
+    Versão que não é exata (`@2`, `@^2.45`, nenhuma) volta vazia: para o OSV,
+    só versão exata responde alguma coisa, e para o achado local é exatamente
+    o que importa — o código que roda muda sem que o repositório mude.
+    """
+    out = []
+    for m in _RE_IMPORT_DENO.finditer(texto):
+        versao = (m.group("versao") or "").strip()
+        exata = versao.lstrip("v") if _RE_VERSAO_EXATA.match(versao) else ""
+        linha = texto.count("\n", 0, m.start()) + 1
+        out.append((m.group("nome"), exata, linha, m.group(0)))
+    return out
+
+
+def _tem_deno_lock(arq: Path, raiz: Path) -> bool:
+    """`deno.lock` na pasta do arquivo ou em alguma acima, até a raiz varrida.
+    Com ele, `@2` resolve sempre para a mesma versão — e o lock tem hash."""
+    d = arq.parent
+    while True:
+        if (d / "deno.lock").is_file():
+            return True
+        if d == raiz or d.parent == d:
+            return False
+        d = d.parent
+
+
+def _achados_deno(arq: Path, rel: str, raiz: Path) -> list[dict]:
+    try:
+        texto = arq.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    if _tem_deno_lock(arq, raiz):
+        return []
+    achados = []
+    for nome, exata, linha, espec in imports_deno(texto):
+        if exata:
+            continue
+        achados.append({
+            "rule": "supply.deno-import-sem-versao-exata",
+            "severity": "MEDIUM", "context": "",
+            "path": rel, "line": linha,
+            "message": (
+                f"`{espec}` não fixa versão exata e não há `deno.lock`: a cada "
+                f"deploy o Deno resolve a versão mais nova que casar, então o "
+                f"código que roda em produção muda sem que o repositório mude "
+                f"— e sem nada que confira o conteúdo baixado. Fixe a versão "
+                f"(`{nome}@X.Y.Z`) ou versione um `deno.lock`."),
+        })
+    return achados
+
+
 def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
     achados: list[dict] = []
     vistos: set[tuple] = set()
@@ -199,6 +293,8 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
                 novos = _achados_do_package_lock(arq, rel)
             elif nome.startswith("requirements") and nome.endswith(".txt"):
                 novos = _achados_do_requirements(arq, rel)
+            elif e_fonte_deno(arq):
+                novos = _achados_deno(arq, rel, raiz)
             else:
                 continue
             for a in novos:

@@ -1,0 +1,66 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Administrador que DEFINE a senha de outra pessoa pela API admin do Auth.
+  #
+  # NAO e' regra do RAPTOR. Escrita a partir de codigo real: o painel de
+  # equipe de um app criava a conta do funcionario com a senha que o gerente
+  # digitava. Nada vaza na hora -- o problema e' o que a senha deixa de provar.
+  # Senha que duas pessoas conhecem nao identifica quem fez a acao, e e' nessa
+  # identificacao que se apoiam o registro de quem removeu item, quem fechou o
+  # caixa, quem estornou. O gerente pode agir como o funcionario e o registro
+  # diz que foi o funcionario.
+  #
+  # O padrao que resolve: criar a conta com uma senha aleatoria que ninguem ve'
+  # e entregar um convite/codigo de definicao (`generate_link` tipo `invite`
+  # ou `recovery`); a pessoa escolhe a propria senha.
+  #
+  # A trava contra falso positivo e' o VALOR: senha vinda de um gerador
+  # (`crypto`, `random`, `generate...`) nao e' conhecida por ninguem e nao e'
+  # acusada.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.supabase.admin-define-senha-de-outro
+    message: >-
+      A conta e' criada (ou a senha trocada) pela API admin do Auth com uma
+      senha que vem de fora -- tipicamente digitada por um administrador. A
+      senha passa a ser conhecida por duas pessoas e deixa de provar quem fez
+      o que: o administrador pode agir como o usuario e o registro aponta para
+      o usuario. Crie a conta com senha aleatoria e devolva um convite ou
+      codigo de definicao (`generate_link` com `invite`/`recovery`), para a
+      pessoa escolher a propria.
+    languages: [typescript, javascript]
+    severity: WARNING
+    # TAINT, nao casamento de valor: a senha quase sempre passa por uma
+    # variavel (`const senha = c.senha ?? ''`), e casar o VALOR acusava tambem
+    # a forma correta (`const senha = gerarSenhaAleatoria()`). O que define o
+    # problema e' a ORIGEM -- o corpo da requisicao, ou seja, alguem digitou.
+    mode: taint
+    pattern-sources:
+      - pattern: await $REQ.json()
+      - pattern: await $REQ.formData()
+      - pattern: $REQ.body
+    pattern-sinks:
+      - patterns:
+          - pattern-inside: |
+              $C.auth.admin.createUser({..., password: $P, ...})
+          - focus-metavariable: $P
+      - patterns:
+          - pattern-inside: |
+              $C.auth.admin.updateUserById($ID, {..., password: $P, ...})
+          - focus-metavariable: $P
+      - patterns:
+          - pattern-inside: |
+              fetch($U, {..., body: JSON.stringify({..., password: $P, ...}), ...})
+          # `metavariable-pattern` em modo generic, nao `metavariable-regex`: a
+          # URL quase sempre e' template literal (`${URL}/auth/v1/admin/users`)
+          # e o metavariable-regex NAO casa dentro dele -- medido, a regra
+          # nascia muda justamente na forma mais comum.
+          - metavariable-pattern:
+              metavariable: $U
+              language: generic
+              pattern-regex: auth/v1/admin/users
+          - focus-metavariable: $P
+    metadata:
+      cwe: ["CWE-308: Use of Single-factor Authentication",
+            "CWE-286: Incorrect User Management"]
+      owasp_top_10: ["A07:2021-Identification and Authentication Failures"]
+      tags: ["security", "supabase", "auth", "edge-functions", "non-repudiation"]

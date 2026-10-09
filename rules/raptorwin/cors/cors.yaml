@@ -1,0 +1,115 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # CORS: as tres formas que importam, com a severidade que cada uma merece.
+  #
+  # NAO sao regras do RAPTOR. A calibracao veio de um caso real e de um erro de
+  # raciocinio que vale registrar: uma Edge Function administrativa respondia
+  # `Access-Control-Allow-Origin: *`, e a primeira leitura foi "qualquer site
+  # pode chamar a funcao com o token do administrador". Nao pode. O token
+  # Bearer mora no localStorage DA ORIGEM do app; um site terceiro nao o le' e
+  # o navegador nao o anexa sozinho. Com autenticacao por Bearer, `*` e'
+  # endurecimento a fazer, nao vazamento.
+  #
+  # O que vaza de verdade e' a credencial que o NAVEGADOR anexa sozinho --
+  # cookie de sessao -- combinada com uma origem aberta. Por isso:
+  #
+  #   * origem REFLETIDA + Allow-Credentials  -> ERROR (o caso explorável);
+  #   * origem refletida sem lista             -> WARNING (vira o ERROR no dia
+  #                                               em que alguem ligar cookie);
+  #   * `*` em funcao que administra contas    -> INFO (endurecimento).
+  #
+  # `*` + Allow-Credentials NAO e' acusado: o navegador recusa a combinacao, a
+  # resposta simplesmente nao e' lida. E' um bug de funcionamento, nao de
+  # seguranca, e acusa-lo como vulnerabilidade ensinaria a desconfiar da regra.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.cors.origem-refletida-com-credenciais
+    message: >-
+      CORS devolve a origem da propria requisicao em
+      `Access-Control-Allow-Origin` E liga `Access-Control-Allow-Credentials`.
+      Qualquer site que o usuario abrir pode chamar esta rota levando o cookie
+      de sessao dele e LER a resposta -- e' a combinacao que transforma CORS em
+      vazamento. Compare a origem com uma lista fixa antes de ecoa-la; o que
+      nao estiver na lista volta sem o cabecalho.
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.get($O), ..., 'Access-Control-Allow-Credentials': 'true', ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.get($O) ?? $D, ..., 'Access-Control-Allow-Credentials': 'true', ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.get($O) || $D, ..., 'Access-Control-Allow-Credentials': 'true', ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Credentials': 'true', ..., 'Access-Control-Allow-Origin': $R.headers.get($O), ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.origin, ..., 'Access-Control-Allow-Credentials': 'true', ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Credentials': 'true', ..., 'Access-Control-Allow-Origin': $R.headers.origin, ...}
+      - metavariable-regex:
+          metavariable: $R
+          regex: (?i)^(req|request|r|event|ctx|c)$
+    metadata:
+      cwe: ["CWE-942: Permissive Cross-domain Policy with Untrusted Domains"]
+      owasp_top_10: ["A05:2021-Security Misconfiguration"]
+      tags: ["security", "cors"]
+
+  - id: raptorwin.cors.origem-refletida
+    message: >-
+      CORS devolve a origem da propria requisicao em
+      `Access-Control-Allow-Origin`, sem lista: e' o mesmo que `*`, so' que
+      escondido. Hoje pode nao vazar nada (se a autenticacao e' por token
+      Bearer, um site terceiro nao tem o token), mas no dia em que alguem
+      ligar `Allow-Credentials` ou passar a sessao para cookie, vira leitura de
+      resposta autenticada por qualquer site. Compare com uma lista fixa de
+      origens antes de ecoar.
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.get($O), ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.get($O) ?? $D, ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.get($O) || $D, ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.origin, ...}
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': $R.headers.origin || $D, ...}
+          - pattern: $H.set('Access-Control-Allow-Origin', $R.headers.get($O))
+          - pattern: $H.setHeader('Access-Control-Allow-Origin', $R.headers.origin)
+          - pattern: $H.header('Access-Control-Allow-Origin', $R.headers.origin)
+      - metavariable-regex:
+          metavariable: $R
+          regex: (?i)^(req|request|r|event|ctx|c)$
+      # Ja' coberto pela regra de cima, que e' mais grave.
+      - pattern-not: |
+          {..., 'Access-Control-Allow-Credentials': 'true', ...}
+    metadata:
+      cwe: ["CWE-942: Permissive Cross-domain Policy with Untrusted Domains"]
+      owasp_top_10: ["A05:2021-Security Misconfiguration"]
+      tags: ["security", "cors"]
+
+  - id: raptorwin.cors.curinga-em-funcao-administrativa
+    message: >-
+      `Access-Control-Allow-Origin: *` num arquivo que administra contas do
+      Auth com a `service_role`. Nao e' vazamento por si so' -- com token
+      Bearer, um site terceiro nao tem o token para mandar --, e' superficie
+      que nao precisa existir: restrinja as origens que servem o app (dominio,
+      previas de deploy, localhost) e monte os cabecalhos por requisicao, nao
+      numa variavel do modulo, que o isolate compartilha entre chamadas
+      simultaneas.
+    languages: [typescript, javascript]
+    severity: INFO
+    patterns:
+      - pattern-either:
+          - pattern: |
+              {..., 'Access-Control-Allow-Origin': '*', ...}
+          - pattern: $H.set('Access-Control-Allow-Origin', '*')
+      # Funcao administrativa: o arquivo mexe em contas pela API admin do Auth.
+      - pattern-regex: "(?s)\\A.*(auth/v1/admin|auth\\.admin\\.)"
+    metadata:
+      cwe: ["CWE-942: Permissive Cross-domain Policy with Untrusted Domains"]
+      owasp_top_10: ["A05:2021-Security Misconfiguration"]
+      tags: ["security", "cors", "supabase", "edge-functions", "hardening"]
