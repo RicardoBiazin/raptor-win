@@ -31,6 +31,7 @@ import urllib.request
 from collections import Counter, defaultdict
 
 import baseline as baseline_mod
+import bundle_scan
 import db_audit
 import headers_lint
 import supply_chain
@@ -386,7 +387,8 @@ def short_rule(rule: str) -> str:
     return rule.split(".")[-1] if "." in rule else rule
 
 
-def render_console(findings: list[dict], files_scanned: int, rules_run: int) -> None:
+def render_console(findings: list[dict], files_scanned: int, rules_run: int,
+                   sast: bool = True) -> None:
     by_sev = Counter(f["severity"] for f in findings)
     print("\n" + "=" * 62)
     print(" raptor-win — relatório consolidado")
@@ -403,7 +405,9 @@ def render_console(findings: list[dict], files_scanned: int, rules_run: int) -> 
     print(f" total: {len(findings)}  ·  exigem atenção: {len(real)}")
     print("-" * 62)
     if not findings:
-        if files_scanned == 0:
+        if not sast:
+            print(" Nenhum achado. ✅")
+        elif files_scanned == 0:
             print(" ⚠ 0 arquivos escaneáveis. O Semgrep ignora por padrão pastas como")
             print("   test/ tests/ fixtures/ node_modules/ .venv/ — aponte para o código-")
             print("   fonte (ex.: 'src' ou a raiz do app), não para uma pasta de testes.")
@@ -1405,7 +1409,11 @@ def main() -> int:
         prog="raptor-win",
         description="SAST runner (Semgrep + RAPTOR rules + registry packs) para Windows/macOS/Linux.",
     )
-    ap.add_argument("target", nargs="+", help="pasta(s) ou arquivo(s) a escanear")
+    ap.add_argument("target", nargs="*", help="pasta(s) ou arquivo(s) a escanear")
+    ap.add_argument("--url", nargs="+", metavar="URL",
+                    help="varre o que um visitante lê de um site SEU: bundles JS, "
+                         "caminhos sensíveis, source map e leitura anon do Supabase "
+                         "(só GET; sem alvo local, pode usar só --url)")
     ap.add_argument("--md", metavar="FILE", help="escreve relatório Markdown")
     ap.add_argument("--sarif", metavar="FILE", help="escreve SARIF 2.1.0 (upload no GitHub Code Scanning)")
     ap.add_argument("--json-out", metavar="FILE", help="escreve o JSON bruto do Semgrep")
@@ -1434,6 +1442,10 @@ def main() -> int:
     ap.add_argument("--fail-on", choices=[s for s in SEV_RANK if s != "UNKNOWN"],
                     help="sai com código 1 se houver achado real >= esta severidade")
     args = ap.parse_args()
+    if not args.target and not args.url:
+        ap.error("informe ao menos um alvo local ou --url")
+    if args.changed and not args.target:
+        ap.error("--changed precisa de um alvo local (repositório git)")
 
     semgrep = find_semgrep()
 
@@ -1455,9 +1467,10 @@ def main() -> int:
         print(f"modo --changed: {len(targets)} arquivo(s) alterado(s) desde {args.changed}")
 
     raptor_rules = Path(args.raptor_rules).resolve() if args.raptor_rules else RAPTOR_RULES
-    exts = detect_languages(targets)
-    configs = build_configs(exts, not args.no_raptor, not args.no_registry, raptor_rules)
-    if not configs and not args.sca and not args.secrets and not args.db_audit:
+    exts = detect_languages(targets) if targets else set()
+    configs = (build_configs(exts, not args.no_raptor, not args.no_registry, raptor_rules)
+               if targets else [])
+    if not configs and not args.sca and not args.secrets and not args.db_audit and not args.url:
         sys.stderr.write("nenhuma configuração de regra selecionada (e --sca não foi pedido).\n")
         return 2
 
@@ -1529,14 +1542,20 @@ def main() -> int:
     # nenhum tratamento à parte. Um segredo comitado é achado de segurança
     # como outro qualquer — não merece um relatório separado que ninguém lê.
     seg = None
-    if args.secrets:
+    if args.secrets and targets:
         seg = secrets_scan.escanear(targets, SKIP_DIRS)
         findings = sorted(findings + seg,
                           key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
         render_secrets(seg)
 
+    bundle = None
+    if args.url:
+        bundle = bundle_scan.escanear_urls(args.url)
+        findings = sorted(findings + bundle,
+                          key=lambda f: (SEV_RANK.get(f["severity"], 9), f["path"], f["line"]))
+
     sca = None
-    if args.sca:
+    if args.sca and targets:
         sca = run_sca(targets)
         render_sca(sca)
         if not sca.get("error"):
@@ -1573,7 +1592,8 @@ def main() -> int:
     # reprovar por um risco que já tinha sido decidido e justificado.
     alvo_baseline = args.baseline
     if alvo_baseline is None:
-        raiz_alvo = targets[0] if targets[0].is_dir() else targets[0].parent
+        raiz_alvo = ((targets[0] if targets[0].is_dir() else targets[0].parent)
+                     if targets else Path("."))
         for candidato in (Path(baseline_mod.NOME_PADRAO), raiz_alvo / baseline_mod.NOME_PADRAO):
             if candidato.exists():
                 alvo_baseline = str(candidato)
@@ -1600,11 +1620,12 @@ def main() -> int:
 
     # Todos os formatos são gerados somente depois de reunir SAST, credenciais
     # e SCA e de aplicar o baseline. Assim preservam a mesma visão dos achados.
-    if findings or configs or args.db_audit:
-        render_console(findings, files_scanned, rules_run)
+    if findings or configs or args.db_audit or args.url:
+        render_console(findings, files_scanned, rules_run, sast=bool(targets))
     if args.md:
         Path(args.md).write_text(
-            render_markdown(findings, str(targets[0]), files_scanned, rules_run,
+            render_markdown(findings, str(targets[0]) if targets else "(--url)",
+                            files_scanned, rules_run,
                             checagens_extras(seg, sca)),
             encoding="utf-8")
         print(f"\nMarkdown: {args.md}")
@@ -1616,7 +1637,7 @@ def main() -> int:
         print()
         print(baseline_mod.prox_de_aceitar(findings))
 
-    if args.fail_on and (configs or args.secrets or args.sca or args.db_audit):
+    if args.fail_on and (configs or args.secrets or args.sca or args.db_audit or args.url):
         floor = SEV_RANK[args.fail_on]
         real = [f for f in exigem_atencao(findings)
                 if not f.get("aceito")

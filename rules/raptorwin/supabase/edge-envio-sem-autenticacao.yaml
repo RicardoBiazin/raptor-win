@@ -1,0 +1,187 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # Edge Function que ENVIA algo pago (e-mail, SMS, WhatsApp, IA) para quem
+  # pediu, sem conferir quem pediu.
+  #
+  # NAO e' regra do RAPTOR. Escrita a partir de um caso real: um projeto tinha
+  # quatro funcoes assim (envio de e-mail, SMS, WhatsApp e chamada de IA). O
+  # gateway do Supabase deixa passar QUALQUER JWT valido, e a anon key vai no
+  # bundle de todo visitante. Sem checagem no codigo, quem tem a anon key envia
+  # e-mail (destinatario e HTML livres) pelo dominio da empresa, manda SMS e
+  # WhatsApp pela conta dela e gasta a cota de IA.
+  #
+  # O que a regra exige: handler que RECEBE a requisicao (parametro) e chama um
+  # provedor pago por host fixo, SEM nenhum sinal de autorizacao no handler:
+  #   - getUser(...)               -> JWT do usuario conferido
+  #   - headers.get(...)           -> cabecalho lido (sessao ou segredo de worker)
+  #   - if (headers.get(..) !== x) -> segredo comparado antes de tocar no envio
+  #   - autorizarCron(req) etc.    -> checagem delegada a helper com nome conhecido
+  # Cabecalho de SAIDA (o Authorization da chamada ao provedor) nao conta.
+  #
+  # Por que pattern-not-inside e nao pattern-not-regex: o Semgrep intersecta o
+  # trecho casado por cada pattern-regex, e o trecho do provedor e' pequeno. Um
+  # pattern-not-regex nao enxerga o resto do handler. Com pattern-not-inside a
+  # checagem olha o handler inteiro.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.supabase.edge-envio-sem-autenticacao
+    message: >-
+      Edge Function que recebe a requisicao e dispara um envio pago
+      (Resend, Twilio, WhatsApp, LLM) sem conferir quem chamou. O gateway do
+      Supabase aceita a anon key, que esta no bundle publico. Quem a tiver
+      envia e-mail, SMS ou gasta IA pela sua conta. Valide o JWT do usuario com
+      `auth.getUser()`, recuse `role=anon`, e limite por organizacao ou
+      destinatario. Se for chamada de servidor, exija um segredo compartilhado
+      num cabecalho proprio, comparado em tempo constante.
+    languages: [typescript, javascript]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern-inside: Deno.serve(async ($REQ) => {...})
+          - pattern-inside: Deno.serve(($REQ) => {...})
+          - pattern-inside: serve(async ($REQ) => {...})
+          - pattern-inside: serve(($REQ) => {...})
+      # Chamada a provedor pago, por host fixo.
+      - pattern-regex: '(api\.resend\.com|api\.twilio\.com|graph\.facebook\.com|integrate\.api\.nvidia\.com|api\.openai\.com|api\.anthropic\.com|api\.deepseek\.com|generativelanguage\.googleapis\.com)'
+      # Sinal de autorizacao em QUALQUER lugar do handler suprime o achado.
+      - pattern-not-inside:
+          pattern-either:
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  autorizarCron($REQ)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  autorizarCron($REQ)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  autorizar($REQ)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  autorizar($REQ)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  authorize($REQ)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  authorize($REQ)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  requireAuth($REQ)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  requireAuth($REQ)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  verifyAuth($REQ)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  verifyAuth($REQ)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  checkAuth($REQ)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  checkAuth($REQ)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  exigirAutorizacao($REQ)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  exigirAutorizacao($REQ)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  verificarCron($REQ)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  verificarCron($REQ)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  $X.auth.getUser(...)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  $X.auth.getUser(...)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  $R.headers.get($H)
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  $R.headers.get($H)
+                  ...
+                })
+            - pattern: |
+                serve(async ($REQ) => {
+                  ...
+                  if ($R.headers.get($H) !== $X) {
+                    ...
+                  }
+                  ...
+                })
+            - pattern: |
+                Deno.serve(async ($REQ) => {
+                  ...
+                  if ($R.headers.get($H) !== $X) {
+                    ...
+                  }
+                  ...
+                })
+    metadata:
+      cwe: ["CWE-306: Missing Authentication for Critical Function", "CWE-770: Allocation of Resources Without Limits or Throttling"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      tags: ["security", "supabase", "edge-functions", "authz", "abuse", "email", "sms"]

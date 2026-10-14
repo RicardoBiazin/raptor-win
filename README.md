@@ -29,7 +29,8 @@ For the **full** RAPTOR (fuzzing, crash replay, exploit/patch generation, the au
 | **GitHub Actions** in `.github/workflows` scanned as dependencies (`--sca`) | — |
 | **Secret scanning (`--secrets`)**, incl. secret files not in `.gitignore` | — |
 | **Live Postgres/Supabase catalog audit (`--db-audit`), read-only** | Write to your database (four layers stop it) |
-| **Security headers** of the static host (`netlify.toml`, `_headers`, `vercel.json`) | Fetch your live site to check them |
+| **Security headers** of the static host (`netlify.toml`, `_headers`, `vercel.json`) | Fetch your live site to check them (use `--url` for that) |
+| **Published site, read-only (`--url`)**: secrets in the JS a visitor downloads, JWT `service_role`, source maps with code, sensitive paths, anon reads of Supabase tables | Write, authenticate, or print row values |
 | **DOM XSS sinks in JS/TS** + DOMPurify misconfiguration | — |
 | **Supabase**: table never put under RLS, Edge Function running as `service_role` without reading the request, secret behind a bundler-public prefix | — |
 | **Supply chain** from the lockfile: install scripts, non-registry `resolved`, missing `integrity`, extra pip index | Download or execute the package |
@@ -302,6 +303,18 @@ Windows launcher (puts `semgrep` on PATH automatically):
   fill in. Deliberately *not* written straight to the file: a command that accepts everything at
   once is a rubber stamp, and then the baseline stops meaning "someone looked".
 
+- `--url URL [URL ...]` — **read-only check of a site you publish**, from the point of view of a visitor.
+  It downloads the page and the scripts it references, looks for secrets in them (same patterns as
+  `--secrets`), decodes any JWT to read its `role` (only `service_role` is flagged; the public `anon`
+  key is expected), follows a `sourceMappingURL` and flags it when it carries `sourcesContent`, and
+  probes a few sensitive paths (`.env`, `.git/config`, `source.zip`, …). A SPA answers `200` with the
+  HTML shell for *any* path, so a path only counts when its *content* matches (a `.env` must have
+  `KEY=value` lines, not HTML). If the bundle carries a Supabase project URL and a public key, it reads
+  each table the bundle queries **with that public key**, in every schema the bundle declares
+  (`db: { schema: … }`), and reports only the row count and column names — never the values.
+  Only `GET` requests. Use it on your own sites: it makes real requests, and the target is explicit
+  (no discovery). Without a local target you can run it alone: `raptor_win.py --url https://…`.
+  Limits are per page (200 requests, 40 tables) and a hit on a limit is reported, never silent.
 - `--fail-on {CRITICAL,ERROR,HIGH,WARNING,MEDIUM,INFO,LOW}` — non-zero exit if a real finding at/above
   that severity exists.
 
@@ -448,6 +461,25 @@ Static analysis reports *possibilities*; you still validate exploitability.
     **no** session (service_role, cron, an anonymous call) never reaches the check, so the exception
     is never raised. If a system caller is meant to pass, test for it explicitly instead of treating
     "no uid" as trusted.
+  - `sql.update-propria-linha-escala-privilegio` (**ERROR**) — a table where `authenticated` has
+    `UPDATE` on the **whole table** (`grant update on t to authenticated`, no column list) and an
+    UPDATE policy keyed on the owner (`id = auth.uid()`), while a **power column** (`is_*admin*`,
+    `is_master`, `role`, `papel`, `org_id`, `tenant_id`) is writable by that user. Any logged-in user
+    then runs `update t set <power column> = … where id = auth.uid()`. A column is considered covered
+    if a trigger references it (`new.<col>` / `old.<col>`) or the UPDATE policy mentions it (the RLS
+    then constrains the new row). GRANT and REVOKE are applied in file order, so a later
+    `revoke update` and a column-level `grant update (…)` close it.
+  - `sql.org-comparacao-null-passa` (WARNING) — `if x <> my_org() then raise …` (or
+    `not visivel_para_mim(…)`) in a function body. A user with **no** organisation makes `my_org()`
+    NULL, the comparison becomes NULL, the `if` is not taken and the `raise` never happens. Fix with
+    `my_org() is null or …`, or make the helper return `false` instead of NULL. `is null` /
+    `coalesce(` in the same condition are accepted as explicit NULL handling.
+  - `sql.security-definer-param-sem-conferencia` (WARNING) — `SECURITY DEFINER` function that checks
+    the session (so it is not caught by `tenant-param`) but uses a tenant-shaped parameter without
+    comparing it to `my_org()` / `auth.jwt()`, e.g. `org := coalesce(p_org, my_org())`: the caller
+    picks the organisation whenever the parameter is filled. Functions that gate on a **platform**
+    super-admin (`is_platform_admin()`, `sou_platform_admin()`) are exempt: cross-organisation is
+    their job. A variable assigned from the parameter (`v := coalesce(p, …)`) counts as the parameter.
   - `sql.supabase.execute-nunca-fechado` — `SECURITY DEFINER` function that **no** `GRANT`/`REVOKE
     EXECUTE` mentions in any file: on Supabase it is born callable by `anon`, because the platform
     runs `ALTER DEFAULT PRIVILEGES … GRANT EXECUTE ON FUNCTIONS TO anon, authenticated`. Closing
@@ -458,6 +490,15 @@ Static analysis reports *possibilities*; you still validate exploitability.
     at `INFO` with a **different** message: policies are evaluated with the *querying* role's
     privileges, so revoking from `authenticated` breaks every query on the table with "permission
     denied for function" — the message is the mitigation, not the heuristic.
+  - `supabase/edge-envio-sem-autenticacao` (**ERROR**, Semgrep) — Edge Function that receives the request
+    and calls a paid provider by a fixed host (Resend, Twilio, WhatsApp Graph, OpenAI, Anthropic,
+    DeepSeek, NVIDIA, Gemini) with **no** authorisation signal in the handler: no `getUser(…)`, no
+    header read (`req.headers.get(…)`, which covers session and worker secrets), no
+    `if (req.headers.get(…) !== …)`, and no call to a helper named `autorizarCron`/`authorize`/
+    `requireAuth`/… . The gateway accepts the public anon key, so without a check anyone with it can
+    send mail or SMS from your domain and spend your AI quota. An outbound `Authorization` header to
+    the provider does not count. Helper detection is by name on purpose: a generic `f(req)` would
+    also match `corsFor(req)`.
 - `db_audit.py` — read-only live-catalog checks (`db.*`), authored for `raptor-win`. Reads only
   world-readable catalog relations; never writes. See `--db-audit` above.
 - Semgrep and its Registry packs are © r2c/Semgrep, used per their terms.

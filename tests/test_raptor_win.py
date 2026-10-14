@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -986,6 +987,144 @@ class GuardaNullUidTests(MultiArquivoMixin, unittest.TestCase):
                  "if not is_admin() then raise exception 'nao'; end if; end if;")
         self.assertIn(GUARDA_NULL, self._rules(
             DEF % ("", "set search_path = public, pg_temp", corpo)))
+
+
+PARAM_SEM_CONF = "sql.security-definer-param-sem-conferencia"
+ORG_NULL = "sql.org-comparacao-null-passa"
+UPDATE_PROPRIO = "sql.update-propria-linha-escala-privilegio"
+
+# Molde de DEFINER que confere a sessão e recebe o inquilino por parâmetro.
+DEF_ORG = ("create or replace function public.fn_x(%s)\n"
+           "returns integer language plpgsql security definer\n"
+           "set search_path = public, pg_temp as $$ begin %s return 1; end; $$;\n")
+
+
+class ParamSemConferenciaTests(MultiArquivoMixin, unittest.TestCase):
+    """`coalesce(p_org, my_org())`: a sessão existe, mas o parâmetro não é conferido."""
+
+    def test_coalesce_sem_comparacao_acusa(self):
+        corpo = ("if auth.uid() is null then raise exception 'x'; end if; "
+                 "org := coalesce(p_org, my_org());")
+        self.assertIn(PARAM_SEM_CONF,
+                      self._rules(DEF_ORG % ("p_org uuid", corpo)))
+
+    def test_comparacao_com_sessao_nao_acusa(self):
+        corpo = ("if auth.uid() is null then raise exception 'x'; end if; "
+                 "if p_org is not null and p_org <> my_org() then "
+                 "raise exception 'outra org'; end if;")
+        self.assertNotIn(PARAM_SEM_CONF,
+                         self._rules(DEF_ORG % ("p_org uuid", corpo)))
+
+    def test_sem_sessao_fica_para_a_regra_irma(self):
+        """Sem nenhum marcador de sessão, o caso é o do tenant-param, não este."""
+        corpo = "org := p_org;"
+        regras = self._rules(DEF_ORG % ("p_org uuid", corpo))
+        self.assertNotIn(PARAM_SEM_CONF, regras)
+        self.assertIn(TENANT_PARAM, regras)
+
+    def test_invoker_nao_acusa(self):
+        sql = ("create or replace function public.fn_i(p_org uuid) returns int "
+               "language sql security invoker as $$ select 1 where p_org = my_org() $$;\n")
+        self.assertNotIn(PARAM_SEM_CONF, self._rules(sql))
+
+
+class OrgNullTests(MultiArquivoMixin, unittest.TestCase):
+    """`x <> my_org()` sem org na sessão vira NULL e o `raise` não dispara."""
+
+    def test_diferente_de_my_org_acusa(self):
+        corpo = ("if auth.uid() is null then raise exception 'x'; end if; "
+                 "if v_org <> my_org() then raise exception 'outra'; end if;")
+        self.assertIn(ORG_NULL, self._rules(DEF_ORG % ("", corpo)))
+
+    def test_not_visivel_para_mim_acusa(self):
+        corpo = ("if not visivel_para_mim(v_filial) then raise exception 'x'; end if;")
+        self.assertIn(ORG_NULL, self._rules(DEF_ORG % ("", corpo)))
+
+    def test_tratamento_explicito_do_null_nao_acusa(self):
+        corpo = ("if my_org() is null or v_org <> my_org() then "
+                 "raise exception 'x'; end if;")
+        self.assertNotIn(ORG_NULL, self._rules(DEF_ORG % ("", corpo)))
+
+    def test_igual_a_my_org_nao_acusa(self):
+        """`=` falha fechado: NULL não entra no ramo, então não é a armadilha."""
+        corpo = "if v_org = my_org() then return 1; end if;"
+        self.assertNotIn(ORG_NULL, self._rules(DEF_ORG % ("", corpo)))
+
+
+class UpdatePropriaLinhaTests(MultiArquivoMixin, unittest.TestCase):
+    """GRANT UPDATE de tabela inteira + policy pela própria linha + coluna de poder."""
+
+    TABELA = "create table public.profiles (id uuid primary key, name text, is_platform_admin boolean not null default false, role text);\n"
+    GRANT_TUDO = "grant select, update on public.profiles to authenticated;\n"
+    POLICY_DONO = ("create policy profiles_update on public.profiles for update to authenticated\n"
+                   "using (id = (select auth.uid()));\n")
+    GATILHO_ROLE = ("create or replace function protect_profile_role() returns trigger\n"
+                    "language plpgsql security definer set search_path = public, pg_temp as $$\n"
+                    "begin if new.role is distinct from old.role then raise exception 'x'; end if;\n"
+                    "return new; end $$;\n"
+                    "create trigger protect_role before update on public.profiles "
+                    "for each row execute function protect_profile_role();\n")
+
+    def test_caso_real_acusa(self):
+        """Só `role` é guardado; `is_platform_admin` fica aberto."""
+        regras = self._rules(self.TABELA, self.GRANT_TUDO, self.POLICY_DONO, self.GATILHO_ROLE)
+        self.assertIn(UPDATE_PROPRIO, regras)
+
+    def test_coluna_protegida_por_gatilho_nao_acusa(self):
+        gatilho = self.GATILHO_ROLE.replace(
+            "if new.role is distinct from old.role then",
+            "if new.role is distinct from old.role or new.is_platform_admin is distinct from old.is_platform_admin then")
+        regras = self._rules(self.TABELA, self.GRANT_TUDO, self.POLICY_DONO, gatilho)
+        self.assertNotIn(UPDATE_PROPRIO, regras)
+
+    def test_coluna_citada_na_policy_de_update_nao_acusa(self):
+        """`org_id = my_org()` na policy de UPDATE já impede trocar a org."""
+        policy = ("create policy profiles_update on public.profiles for update to authenticated\n"
+                  "using (id = (select auth.uid()) and is_platform_admin = false and role = 'cliente');\n")
+        regras = self._rules(self.TABELA, self.GRANT_TUDO, policy)
+        self.assertNotIn(UPDATE_PROPRIO, regras)
+
+    def test_coluna_nao_citada_continua_acusando(self):
+        """Só `role` na policy: `is_platform_admin` segue aberta e a regra acusa."""
+        policy = ("create policy profiles_update on public.profiles for update to authenticated\n"
+                  "using (id = (select auth.uid()) and role = 'cliente');\n")
+        regras = self._rules(self.TABELA, self.GRANT_TUDO, policy)
+        self.assertIn(UPDATE_PROPRIO, regras)
+
+    def test_grant_por_coluna_nao_acusa(self):
+        regras = self._rules(self.TABELA,
+                             "grant select, update (name) on public.profiles to authenticated;\n",
+                             self.POLICY_DONO)
+        self.assertNotIn(UPDATE_PROPRIO, regras)
+
+    def test_revoke_posterior_fecha(self):
+        regras = self._rules(self.TABELA, self.GRANT_TUDO,
+                             "revoke update on public.profiles from authenticated;\n"
+                             "grant update (name) on public.profiles to authenticated;\n",
+                             self.POLICY_DONO)
+        self.assertNotIn(UPDATE_PROPRIO, regras)
+
+    def test_sem_policy_pela_propria_linha_nao_acusa(self):
+        policy = ("create policy profiles_admin on public.profiles for update to authenticated\n"
+                  "using (is_admin());\n")
+        self.assertNotIn(UPDATE_PROPRIO,
+                         self._rules(self.TABELA, self.GRANT_TUDO, policy))
+
+    def test_so_anon_nao_acusa(self):
+        regras = self._rules(self.TABELA,
+                             "grant update on public.profiles to anon;\n",
+                             self.POLICY_DONO)
+        self.assertNotIn(UPDATE_PROPRIO, regras)
+
+    def test_coluna_adicionada_por_alter_acusa(self):
+        regras = self._rules(
+            "create table public.perfis (id uuid primary key, nome text);\n"
+            "alter table public.perfis add column is_master boolean default false;\n"
+            "grant update on public.perfis to authenticated;\n"
+            "create policy p on public.perfis for update to authenticated "
+            "using (user_id = auth.uid());\n"
+            "alter table public.perfis add column user_id uuid;\n")
+        self.assertIn(UPDATE_PROPRIO, regras)
 
 
 class ExecuteNuncaFechadoTests(MultiArquivoMixin, unittest.TestCase):
@@ -2123,6 +2262,298 @@ Deno.serve(async () => {
 })
 """, ".ts")
         self.assertEqual(achados, set())
+
+
+def _jwt(role: str) -> str:
+    """JWT de mentira com `role` no payload. A assinatura não importa aqui."""
+    def b64(d: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+    return f"{b64({'alg': 'HS256'})}.{b64({'role': role, 'iss': 'supabase'})}.assinaturafalsa123"
+
+
+class TestBundleScan(unittest.TestCase):
+    """Varredura de site publicado com `buscar` falso: nenhum teste toca a rede."""
+
+    PAG = "https://site.exemplo.com.br/"
+    CSP_OK = {"content-security-policy": "default-src 'self'; frame-ancestors 'none'",
+              "strict-transport-security": "max-age=31536000"}
+
+    def _varrer(self, rotas: dict, pagina_html: str = "", cab: dict | None = None):
+        import bundle_scan
+        html = pagina_html or '<script type="module" src="/assets/index.js"></script>'
+
+        def falso(url, headers=None):
+            if url == self.PAG:
+                return bundle_scan.Resp(200, cab if cab is not None else self.CSP_OK,
+                                        html.encode(), url)
+            if url in rotas:
+                st, h, corpo = rotas[url]
+                return bundle_scan.Resp(st, h, corpo.encode() if isinstance(corpo, str) else corpo, url)
+            return bundle_scan.Resp(404, {}, b"not found", url)
+
+        return bundle_scan.escanear_urls([self.PAG], buscar_fn=falso)
+
+    def _regras(self, achados):
+        return {a["rule"] for a in achados}
+
+    def test_service_role_no_bundle_e_critico(self):
+        js = f'const k = "{_jwt("service_role")}";'
+        achados = self._varrer({"https://site.exemplo.com.br/assets/index.js": (200, {}, js)})
+        sev = {a["rule"]: a["severity"] for a in achados}
+        self.assertEqual(sev.get("bundle.jwt-service-role"), "CRITICAL")
+
+    def test_jwt_anon_nao_e_acusado(self):
+        """A chave anon é pública por desenho: não entra como segredo."""
+        js = f'const k = "{_jwt("anon")}";'
+        achados = self._varrer({"https://site.exemplo.com.br/assets/index.js": (200, {}, js)})
+        self.assertNotIn("bundle.jwt-service-role", self._regras(achados))
+        self.assertFalse(any(a["rule"].startswith("bundle.segredo-") and "jwt" in a["rule"]
+                             for a in achados))
+
+    def test_chave_secreta_supabase_e_critica(self):
+        js = 'const k = "sb_secret_abcdefghijklmnop1234";'
+        achados = self._varrer({"https://site.exemplo.com.br/assets/index.js": (200, {}, js)})
+        self.assertIn("bundle.segredo-supabase-secret", self._regras(achados))
+
+    def test_leitura_anon_acusa_sem_exibir_valor(self):
+        ref = "abcdefghijklmnopqrst"
+        js = (f'const u="https://{ref}.supabase.co"; const k="sb_publishable_{"x" * 30}";'
+              f'db.from("contacts").select("*")')
+        rotas = {
+            "https://site.exemplo.com.br/assets/index.js": (200, {}, js),
+            f"https://{ref}.supabase.co/rest/v1/contacts?select=*&limit=1":
+                (206, {"content-range": "0-0/5"}, '[{"id": 1, "email": "maria@exemplo.com"}]'),
+        }
+        achados = self._varrer(rotas)
+        anon = [a for a in achados if a["rule"] == "bundle.anon-le-tabela"]
+        self.assertEqual(len(anon), 1)
+        self.assertIn("5 linha(s)", anon[0]["message"])
+        self.assertIn("email, id", anon[0]["message"])
+        self.assertNotIn("maria@exemplo.com", anon[0]["message"])
+
+    def test_tabela_vazia_nao_acusa(self):
+        ref = "abcdefghijklmnopqrst"
+        js = f'const u="https://{ref}.supabase.co"; const k="sb_publishable_{"x" * 30}"; db.from("x")'
+        rotas = {
+            "https://site.exemplo.com.br/assets/index.js": (200, {}, js),
+            f"https://{ref}.supabase.co/rest/v1/x?select=*&limit=1":
+                (206, {"content-range": "*/0"}, "[]"),
+        }
+        self.assertNotIn("bundle.anon-le-tabela", self._regras(self._varrer(rotas)))
+
+    def test_env_real_acusa(self):
+        rotas = {"https://site.exemplo.com.br/.env":
+                 (200, {"content-type": "text/plain"}, "VITE_URL=https://x\nDB_PASSWORD=abc123\n")}
+        self.assertIn("bundle.exposto-env", self._regras(self._varrer(rotas)))
+
+    def test_spa_responde_200_com_html_para_qualquer_caminho(self):
+        """O caso que engana scanner ingênuo: .env e .git caem no index.html."""
+        html = "<!doctype html><html><body>app</body></html>"
+        rotas = {"https://site.exemplo.com.br/.env": (200, {"content-type": "text/html"}, html),
+                 "https://site.exemplo.com.br/.git/config": (200, {}, html),
+                 "https://site.exemplo.com.br/package.json": (200, {}, html)}
+        regras = self._regras(self._varrer(rotas))
+        self.assertFalse({r for r in regras if r.startswith("bundle.exposto-")})
+
+    def test_git_config_real_acusa(self):
+        rotas = {"https://site.exemplo.com.br/.git/config":
+                 (200, {}, "[core]\n\trepositoryformatversion = 0\n")}
+        self.assertIn("bundle.exposto-git-config", self._regras(self._varrer(rotas)))
+
+    def test_sourcemap_com_codigo_acusa(self):
+        js = "console.log(1)\n//# sourceMappingURL=index.js.map"
+        mapa = json.dumps({"version": 3, "sources": ["src/App.tsx"],
+                           "sourcesContent": ["export const x = 1"]})
+        rotas = {"https://site.exemplo.com.br/assets/index.js": (200, {}, js),
+                 "https://site.exemplo.com.br/assets/index.js.map": (200, {}, mapa)}
+        self.assertIn("bundle.sourcemap-expoe-codigo", self._regras(self._varrer(rotas)))
+
+    def test_sourcemap_sem_codigo_nao_acusa(self):
+        js = "console.log(1)\n//# sourceMappingURL=index.js.map"
+        mapa = json.dumps({"version": 3, "sources": ["a.ts"], "sourcesContent": [None]})
+        rotas = {"https://site.exemplo.com.br/assets/index.js": (200, {}, js),
+                 "https://site.exemplo.com.br/assets/index.js.map": (200, {}, mapa)}
+        self.assertNotIn("bundle.sourcemap-expoe-codigo", self._regras(self._varrer(rotas)))
+
+    def test_cabecalhos_ausentes_geram_baixa(self):
+        regras = self._regras(self._varrer({}, cab={}))
+        self.assertIn("bundle.sem-csp", regras)
+        self.assertIn("bundle.sem-hsts", regras)
+
+    def test_pagina_fora_do_ar_e_informativa(self):
+        import bundle_scan
+        achados = bundle_scan.escanear_urls(
+            ["https://fora.exemplo.com.br/"],
+            buscar_fn=lambda u, headers=None: bundle_scan.Resp(503, {}, b"", u))
+        self.assertEqual([a["rule"] for a in achados], ["bundle.inacessivel"])
+        self.assertEqual(achados[0]["severity"], "INFO")
+
+    def test_falha_transitoria_na_pagina_tem_nova_tentativa(self):
+        """Um timeout isolado não pode virar "inacessível" sem tentar de novo."""
+        import bundle_scan
+        chamadas = []
+
+        def falso(url, headers=None):
+            chamadas.append(url)
+            if len(chamadas) == 1:
+                return None
+            return bundle_scan.Resp(200, dict(self.CSP_OK), b"<html></html>", url)
+
+        achados = bundle_scan.escanear_urls([self.PAG], buscar_fn=falso)
+        self.assertNotIn("bundle.inacessivel", self._regras(achados))
+        self.assertEqual(chamadas[0], chamadas[1])
+
+    def test_schema_declarado_no_bundle_e_sondado(self):
+        """`db: { schema: 'servico' }`: a tabela está fora do `public`."""
+        import bundle_scan
+        ref = "abcdefghijklmnopqrst"
+        js = (f'const u="https://{ref}.supabase.co"; const k="sb_publishable_{"x" * 30}";'
+              f'createClient(u, k, {{ db: {{ schema: "servico" }} }});'
+              f'db.from("conversations").select("*")')
+
+        def falso(url, headers=None):
+            if url == self.PAG:
+                return bundle_scan.Resp(200, dict(self.CSP_OK),
+                                        b'<script src="/assets/index.js"></script>', url)
+            if url.endswith("/assets/index.js"):
+                return bundle_scan.Resp(200, {}, js.encode(), url)
+            if "conversations" in url and (headers or {}).get("Accept-Profile") == "servico":
+                return bundle_scan.Resp(206, {"content-range": "0-0/3"},
+                                        b'[{"id": "u", "status": "x"}]', url)
+            return bundle_scan.Resp(404, {}, b"", url)
+
+        achados = bundle_scan.escanear_urls([self.PAG], buscar_fn=falso)
+        anon = [a for a in achados if a["rule"] == "bundle.anon-le-tabela"]
+        self.assertEqual(len(anon), 1)
+        self.assertIn("servico.conversations", anon[0]["message"])
+
+    def test_teto_de_requisicoes_avisa(self):
+        """Estourar o teto não pode sumir calado: a cobertura perdida é dita."""
+        import bundle_scan
+        from unittest import mock
+
+        def falso(url, headers=None):
+            return bundle_scan.Resp(200, dict(self.CSP_OK), b"<html></html>", url)
+
+        with mock.patch.object(bundle_scan, "MAX_REQS", 2):
+            achados = bundle_scan.escanear_urls([self.PAG], buscar_fn=falso)
+        self.assertIn("bundle.limite-de-requisicoes", self._regras(achados))
+
+    def test_corte_de_tabelas_e_avisado(self):
+        """Mais tabelas que o teto: as que ficaram de fora precisam ser ditas."""
+        import bundle_scan
+        ref = "abcdefghijklmnopqrst"
+        tabelas = " ".join(f'db.from("t{i:02d}");' for i in range(bundle_scan.MAX_TABELAS + 5))
+        js = f'const u="https://{ref}.supabase.co"; const k="sb_publishable_{"x" * 30}"; {tabelas}'
+
+        def falso(url, headers=None):
+            if url == self.PAG:
+                return bundle_scan.Resp(200, dict(self.CSP_OK),
+                                        b'<script src="/assets/index.js"></script>', url)
+            if url.endswith("/assets/index.js"):
+                return bundle_scan.Resp(200, {}, js.encode(), url)
+            return bundle_scan.Resp(404, {}, b"", url)
+
+        achados = bundle_scan.escanear_urls([self.PAG], buscar_fn=falso)
+        self.assertIn("bundle.limite-de-tabelas", self._regras(achados))
+
+    def test_url_que_nao_e_http_e_ignorada(self):
+        import bundle_scan
+        achados = bundle_scan.escanear_urls(["ftp://x.exemplo.com/"],
+                                            buscar_fn=lambda u, headers=None: None)
+        self.assertEqual([a["rule"] for a in achados], ["bundle.url-invalida"])
+
+
+class TestRegraEnvioSemAutenticacao(_BaseRegras):
+    """Edge Function que dispara envio pago para quem pediu, sem conferir quem é."""
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "supabase"
+    ARQ = "edge-envio-sem-autenticacao.yaml"
+    ID = "edge-envio-sem-autenticacao"
+
+    def test_envio_sem_checagem_e_acusado(self):
+        """O caso real: o corpo vai para o Resend sem nenhuma conferência."""
+        achados = self._rodar(self.ARQ, """
+import { serve } from 'https://deno.land/std@0.208.0/http/server.ts'
+serve(async (req) => {
+  const { to, subject, html } = await req.json()
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${Deno.env.get('RESEND_API_KEY')}` },
+    body: JSON.stringify({ from: 'x@y.z', to, subject, html }),
+  })
+  return new Response(JSON.stringify(await r.json()))
+})
+""", ".ts")
+        self.assertIn(self.ID, achados)
+
+    def test_getuser_no_handler_nao_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+import { serve } from 'https://deno.land/std@0.208.0/http/server.ts'
+serve(async (req) => {
+  const { data: { user } } = await supa.auth.getUser(req.headers.get('authorization')?.replace('Bearer ', ''))
+  if (!user) return new Response('nao autorizado', { status: 401 })
+  const { to, subject } = await req.json()
+  await fetch('https://api.resend.com/emails', { method: 'POST', body: JSON.stringify({ to, subject }) })
+  return new Response('ok')
+})
+""", ".ts")
+        self.assertNotIn(self.ID, achados)
+
+    def test_segredo_de_worker_nao_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async (req) => {
+  if (req.headers.get('x-worker-secret') !== Deno.env.get('WORKER_SECRET')) return new Response('', { status: 401 })
+  const { to } = await req.json()
+  await fetch('https://api.twilio.com/2010-04-01/Accounts/AC/Messages.json', { method: 'POST', body: to })
+  return new Response('ok')
+})
+""", ".ts")
+        self.assertNotIn(self.ID, achados)
+
+    def test_helper_de_autorizacao_nao_e_acusado(self):
+        """`autorizarCron(req)` é a checagem, mesmo estando fora do handler."""
+        achados = self._rodar(self.ARQ, """
+import { autorizarCron, respostaErro } from '../_shared/cron.ts'
+Deno.serve(async (req) => {
+  const recusa = autorizarCron(req)
+  if (recusa) return recusa
+  await fetch('https://api.resend.com/emails', { method: 'POST', body: '{}' })
+  return new Response('ok')
+})
+""", ".ts")
+        self.assertNotIn(self.ID, achados)
+
+    def test_helper_de_formatacao_nao_autoriza(self):
+        """`corsFor(req)` não é autorização: o envio continua acusado."""
+        achados = self._rodar(self.ARQ, """
+import { serve } from 'https://deno.land/std@0.208.0/http/server.ts'
+serve(async (req) => {
+  const cors = corsFor(req)
+  const { to } = await req.json()
+  await fetch('https://api.resend.com/emails', { method: 'POST', body: to })
+  return new Response('ok', { headers: cors })
+})
+""", ".ts")
+        self.assertIn(self.ID, achados)
+
+    def test_so_le_resposta_do_provedor_nao_e_acusado(self):
+        """`r.json()` da resposta do provedor não é entrada do cliente."""
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async () => {
+  const r = await fetch('https://api.resend.com/domains')
+  return new Response(JSON.stringify(await r.json()))
+})
+""", ".ts")
+        self.assertNotIn(self.ID, achados)
+
+    def test_sem_provedor_nao_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+Deno.serve(async (req) => {
+  const { nome } = await req.json()
+  return new Response(JSON.stringify({ ola: nome }))
+})
+""", ".ts")
+        self.assertNotIn(self.ID, achados)
 
 
 # ---------------------------------------------------------------------------

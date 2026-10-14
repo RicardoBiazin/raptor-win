@@ -635,6 +635,22 @@ def _achados_search_path(texto: str, rel: str, funcs: list[dict]) -> list[dict]:
     return achados
 
 
+def _params_de_inquilino(args: str) -> list[str]:
+    """Parâmetros cujo NOME tem forma de inquilino e cujo tipo é de id. `nome tipo`."""
+    suspeitos: list[str] = []
+    for parte in _dividir_args(args):
+        campos = parte.split()
+        if campos and campos[0].lower() in ("in", "out", "inout", "variadic"):
+            campos = campos[1:]
+        if len(campos) < 2:
+            continue
+        nome_p = campos[0].strip('"')
+        tipo_p = re.split(r"[\s(\[]", campos[1])[0].lower()
+        if _RE_PARAM_TENANT.match(nome_p) and tipo_p in _TIPOS_ID:
+            suspeitos.append(f"{nome_p} {tipo_p}")
+    return suspeitos
+
+
 def _achados_tenant_param(texto: str, rel: str, funcs: list[dict]) -> list[dict]:
     """DEFINER que recebe o inquilino por PARÂMETRO e não confere a sessão.
 
@@ -653,17 +669,7 @@ def _achados_tenant_param(texto: str, rel: str, funcs: list[dict]) -> list[dict]
             continue
         if _RE_SESSAO.search(f["corpo"]):
             continue
-        suspeitos: list[str] = []
-        for parte in _dividir_args(f["args"]):
-            campos = parte.split()
-            if campos and campos[0].lower() in ("in", "out", "inout", "variadic"):
-                campos = campos[1:]
-            if len(campos) < 2:
-                continue
-            nome_p = campos[0].strip('"')
-            tipo_p = re.split(r"[\s(\[]", campos[1])[0].lower()
-            if _RE_PARAM_TENANT.match(nome_p) and tipo_p in _TIPOS_ID:
-                suspeitos.append(f"{nome_p} {tipo_p}")
+        suspeitos = _params_de_inquilino(f["args"])
         if not suspeitos:
             continue
         achados.append({
@@ -932,6 +938,272 @@ def _achados_sem_rls(criadas: dict, com_rls: set) -> list:
     return achados
 
 
+def _compara_com_sessao(corpo: str, nome: str) -> bool:
+    """O parâmetro (ou variável que recebe dele) é comparado com a sessão no corpo?
+
+    `v := coalesce(p_empresa, minha_empresa())` e depois `v = minha_empresa()`
+    confere o parâmetro por tabela: o alias entra na conta.
+    """
+    nomes = {nome}
+    for var, expr in re.findall(r"(\w+)\s*:=\s*([^;]*)", corpo):
+        if re.search(rf"\b{re.escape(nome)}\b", expr, re.IGNORECASE):
+            nomes.add(var)
+    sess = r"(?:(?:\w+\.)?my_org\s*\(\s*\)|minha_\w+\s*\(\s*\)|auth\.jwt\s*\(\s*\)|current_setting\s*\()"
+    op = r"(?:<>|!=|(?<![:<>!])=|\bis\s+(?:not\s+)?distinct\s+from\b)"
+    for n in nomes:
+        p = re.escape(n)
+        antes = rf"\b{p}\b[^;]{{0,160}}?{op}[^;]{{0,160}}?{sess}"
+        depois = rf"{sess}[^;]{{0,160}}?{op}[^;]{{0,160}}?\b{p}\b"
+        if (re.search(antes, corpo, re.IGNORECASE)
+                or re.search(depois, corpo, re.IGNORECASE)):
+            return True
+    return False
+
+
+# Gate de super-admin da PLATAFORMA: é cross-org por desenho, não é falha de
+# escopo. Cobre `is_platform_admin()` e `sou_platform_admin()` (nomes comuns do gate).
+# (Se o próprio gate estiver fraco, outra checagem acusa.)
+_RE_SUPER_ADMIN = re.compile(r"\b(?:is|sou)_platform_admin\s*\(", re.IGNORECASE)
+
+
+def _achados_param_sem_conferencia(texto: str, rel: str, funcs: list[dict]) -> list[dict]:
+    """DEFINER que confere a sessão MAS usa o parâmetro de inquilino sem compará-lo.
+
+    É o caso `coalesce(p_org, my_org())`: quem chama passa `p_org` e o corpo
+    usa o valor sem nunca conferir contra a sessão. A checagem de sessão
+    existe, por isso a regra de "parâmetro sem sessão" não dispara.
+    """
+    achados: list[dict] = []
+    for f in funcs:
+        if not f["definer"] or f["trigger"] or not f["corpo"].strip():
+            continue
+        if not _RE_SESSAO.search(f["corpo"]):
+            continue  # sem sessão nenhuma: é a regra irmã (tenant-param)
+        if _RE_SUPER_ADMIN.search(f["corpo"]):
+            continue  # super-admin da plataforma age em qualquer org por desenho
+        for suspeito in _params_de_inquilino(f["args"]):
+            nome = suspeito.split()[0]
+            if _compara_com_sessao(f["corpo"], nome):
+                continue
+            achados.append({
+                "rule": "sql.security-definer-param-sem-conferencia",
+                "severity": "WARNING",
+                "context": "",
+                "path": rel,
+                "line": _linha(texto, f["ini_corpo"]),
+                "message": (
+                    f"`{f['nome']}(...)` é SECURITY DEFINER, confere a sessão, mas "
+                    f"usa o parâmetro de inquilino `{nome}` sem compará-lo com "
+                    f"`my_org()`/`auth.jwt()`. Quem chama escolhe a organização "
+                    f"alvo (ex.: `coalesce({nome}, my_org())` usa o parâmetro "
+                    f"quando vem preenchido). Acrescente `if {nome} is not null and "
+                    f"{nome} <> my_org() then raise exception ...` ou derive o "
+                    f"valor só da sessão."
+                ),
+            })
+    return achados
+
+
+# Condição de `if` (até o `then`). O `end if` é descartado na hora de usar.
+_RE_COND_IF = re.compile(r"\bif\b(?P<cond>[^;]{0,300}?)\bthen\b", re.IGNORECASE)
+# Comparação com `my_org()` ou predicado que devolve NULL sem org na sessão.
+_RE_ORG_NULL_TRAP = re.compile(
+    r"(?:<>|!=)\s*(?:\w+\.)?my_org\s*\(\s*\)"
+    r"|(?:\w+\.)?my_org\s*\(\s*\)\s*(?:<>|!=)"
+    r"|\bnot\s+(?:\w+\.)?visivel_para_mim\s*\(",
+    re.IGNORECASE,
+)
+# Se a condição trata o NULL explicitamente, a armadilha não se aplica.
+_RE_NULL_TRATADO = re.compile(r"\bis\s+null\b|\bcoalesce\s*\(", re.IGNORECASE)
+
+
+def _achados_comparacao_org_null(texto: str, rel: str, funcs: list[dict]) -> list[dict]:
+    """`if x <> my_org() then raise` deixa passar quando não há org na sessão.
+
+    Sem org (usuário recém-criado, convite sem `org_id`), `my_org()` é NULL e a
+    comparação vira NULL. Um `if` cuja condição é NULL não executa o `raise`, e
+    a função segue sem a checagem. O mesmo vale para `not visivel_para_mim(...)`,
+    que devolve NULL pelo mesmo motivo.
+    """
+    achados: list[dict] = []
+    for f in funcs:
+        corpo = f["corpo"]
+        if not corpo.strip():
+            continue
+        for m in _RE_COND_IF.finditer(corpo):
+            if corpo[:m.start()].rstrip().lower().endswith("end"):
+                continue  # `end if` não abre condição
+            cond = m.group("cond")
+            if not _RE_ORG_NULL_TRAP.search(cond) or _RE_NULL_TRATADO.search(cond):
+                continue
+            achados.append({
+                "rule": "sql.org-comparacao-null-passa",
+                "severity": "WARNING",
+                "context": "",
+                "path": rel,
+                "line": _linha(texto, f["ini_corpo"] + m.start()),
+                "message": (
+                    f"`{f['nome']}(...)`: a condição compara com `my_org()` (ou usa "
+                    f"`visivel_para_mim`) sem tratar NULL. Usuário sem organização "
+                    f"faz `my_org()` virar NULL, a condição vira NULL, o `raise` não "
+                    f"dispara e a função segue sem a checagem. Acrescente "
+                    f"`my_org() is null or ...` na condição, ou verifique o NULL antes."
+                ),
+            })
+            break  # uma por função basta
+    return achados
+
+
+# ---------------------------------------------------------------------------
+# UPDATE na própria linha com coluna privilegiada.
+#
+# O caso real: `grant update on profiles to authenticated` (a tabela inteira)
+# junto com uma policy de UPDATE `id = auth.uid()`. Quem edita o próprio perfil
+# escreve QUALQUER coluna dele, inclusive a que concede poder (`is_platform_admin`,
+# `role`, `org_id`). Um gatilho que cuida só de `role` não fecha as outras.
+#
+# Estado entre arquivos: o GRANT de uma migração pode ser revogado em outra, e a
+# ordem dos arquivos é a ordem de aplicação. Por isso o estado é atualizado em
+# sequência, igual ao EXECUTE.
+# ---------------------------------------------------------------------------
+_RE_GRANT_TABELA = re.compile(
+    r"\b(?P<acao>grant|revoke)\s+(?P<privs>[\w\s,]+?)\s+on\s+(?:table\s+)?"
+    r"(?P<tabela>[\w.\"]+)\s+(?P<para>to|from)\s+(?P<papeis>[^;]+)",
+    re.IGNORECASE,
+)
+# Quem é o dono da linha: `id = auth.uid()`, `user_id = (select auth.uid())`, ...
+_RE_DONO_DA_LINHA = re.compile(
+    r"\b\w+\s*=\s*\(?\s*(?:select\s+)?auth\.uid\s*\(\s*\)"
+    r"|auth\.uid\s*\(\s*\)\s*\)?\s*=\s*\(?\s*\w+",
+    re.IGNORECASE,
+)
+_RE_CREATE_TABELA = re.compile(
+    r"\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?(?P<tabela>[\w.\"]+)\s*\(",
+    re.IGNORECASE,
+)
+_RE_ADD_COLUNA = re.compile(
+    r"\balter\s+table\s+(?:only\s+)?(?:if\s+exists\s+)?(?P<tabela>[\w.\"]+)\s+"
+    r"add\s+column\s+(?:if\s+not\s+exists\s+)?(?P<coluna>[\w\"]+)",
+    re.IGNORECASE,
+)
+_RE_NEW_OLD_COLUNA = re.compile(r"\b(?:new|old)\.(\w+)", re.IGNORECASE)
+# Colunas que concedem poder. Lista curta de propósito: é o que um atacante
+# escreveria para virar admin ou trocar de organização.
+_RE_COLUNA_PRIVILEGIADA = re.compile(
+    r"^(?:is_\w*admin\w*|is_master|is_superadmin|role|papel|org_id|tenant_id)$",
+    re.IGNORECASE,
+)
+_PRIMEIRAS_NAO_COLUNA = {"constraint", "primary", "unique", "foreign", "check",
+                         "exclude", "like"}
+
+
+def _nome_tabela(alvo: str) -> str:
+    return _norm(alvo).split(".")[-1].strip('"')
+
+
+def _novo_estado_update() -> dict:
+    return {
+        "grant": {},        # tabela -> (rel, linha) do GRANT UPDATE inteiro ativo
+        "politica": set(),  # tabelas com policy de UPDATE por posse, p/ authenticated
+        "colunas": {},      # tabela -> [(coluna, rel, linha)] privilegiadas
+        "protegidas": set(),  # colunas referenciadas em NEW./OLD. de algum gatilho
+        "policy_update": {},  # tabela -> texto das policies de UPDATE (USING/CHECK)
+    }
+
+
+def _coletar_update_proprio(texto: str, rel: str, up: dict) -> None:
+    # 1) GRANT/REVOKE de tabela inteira, em ordem de posição.
+    eventos = []
+    for m in _RE_GRANT_TABELA.finditer(texto):
+        privs = {_norm(p) for p in m.group("privs").split(",") if p.strip()}
+        atualiza = "update" in privs or any(p.startswith("all") for p in privs)
+        if not atualiza:
+            continue
+        papeis = _papeis_listados(m.group("papeis"))
+        if not ({"authenticated", "public"} & papeis):
+            continue
+        tab = _nome_tabela(m.group("tabela"))
+        concede = m.group("acao").lower() == "grant"
+        eventos.append((m.start(), concede, tab, rel, _linha(texto, m.start())))
+    for _, concede, tab, arq, ln in sorted(eventos):
+        if concede:
+            up["grant"][tab] = (arq, ln)
+        else:
+            up["grant"].pop(tab, None)
+
+    # 2) Policy de UPDATE para authenticated cujo USING/CHECK é o dono da linha.
+    #    O texto de TODA policy de UPDATE também fica guardado: uma coluna que a
+    #    policy cita (`org_id = my_org()`) já tem a RLS entre ela e a escrita.
+    for m in _RE_POLICY.finditer(texto):
+        body = m.group("body") or ""
+        cmd = _RE_FOR.search(body)
+        if "update" not in _acoes_de(cmd.group(1) if cmd else None):
+            continue
+        tab_pol = _nome_tabela(m.group("table"))
+        up["policy_update"][tab_pol] = up["policy_update"].get(tab_pol, "") + " " + body
+        to = _RE_TO.search(body)
+        if "authenticated" not in _papeis_efetivos(to.group("roles") if to else None):
+            continue
+        if _RE_DONO_DA_LINHA.search(body):
+            up["politica"].add(_nome_tabela(m.group("table")))
+
+    # 3) Colunas privilegiadas: ADD COLUMN e CREATE TABLE.
+    for m in _RE_ADD_COLUNA.finditer(texto):
+        col = m.group("coluna").strip('"')
+        if _RE_COLUNA_PRIVILEGIADA.match(col):
+            up["colunas"].setdefault(_nome_tabela(m.group("tabela")), []).append(
+                (col.lower(), rel, _linha(texto, m.start())))
+    for m in _RE_CREATE_TABELA.finditer(texto):
+        abre = m.end() - 1
+        fim = _fecha_parenteses(texto, abre)
+        if fim < 0:
+            continue
+        for parte in _dividir_args(texto[abre + 1:fim]):
+            campos = parte.split()
+            if not campos:
+                continue
+            col = campos[0].strip('"')
+            if col.lower() in _PRIMEIRAS_NAO_COLUNA or not _RE_COLUNA_PRIVILEGIADA.match(col):
+                continue
+            up["colunas"].setdefault(_nome_tabela(m.group("tabela")), []).append(
+                (col.lower(), rel, _linha(texto, m.start())))
+
+    # 4) Colunas que algum gatilho confere (NEW./OLD.).
+    for m in _RE_NEW_OLD_COLUNA.finditer(texto):
+        up["protegidas"].add(m.group(1).lower())
+
+
+def _achados_update_proprio(up: dict) -> list[dict]:
+    achados: list[dict] = []
+    for tab, (rel, linha) in sorted(up["grant"].items()):
+        if tab not in up["politica"]:
+            continue
+        pol = up["policy_update"].get(tab, "")
+        pendentes = sorted({c for c, _, _ in up["colunas"].get(tab, [])
+                            if c not in up["protegidas"]
+                            and not re.search(rf"\b{re.escape(c)}\b", pol, re.IGNORECASE)})
+        if not pendentes:
+            continue
+        achados.append({
+            "rule": "sql.update-propria-linha-escala-privilegio",
+            "severity": "ERROR",
+            "context": "",
+            "path": rel,
+            "line": linha,
+            "message": (
+                f"`{tab}` concede UPDATE na TABELA INTEIRA a `authenticated` e tem "
+                f"policy de UPDATE pela própria linha, mas as colunas "
+                f"`{', '.join(pendentes)}` concedem poder e nenhum gatilho as "
+                f"confere. Qualquer usuário logado faz `update {tab} set "
+                f"{pendentes[0]} = ... where id = auth.uid()`. Revogue o UPDATE "
+                f"de tabela e conceda só as colunas editáveis "
+                f"(`grant update (nome, ...) on {tab} to authenticated`), ou crie "
+                f"um gatilho BEFORE UPDATE que barre essas colunas fora de service_role."
+            ),
+        })
+    return achados
+
+
 def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
     # Duas fases: índice e policy se resolvem dentro de um arquivo, mas o
     # EXECUTE de uma função se decide entre migrações — o revoke numa, o grant
@@ -950,6 +1222,7 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
     bloco: list[int] = []
     defaults: list[int] = []
     helpers: set[str] = set()
+    up = _novo_estado_update()
 
     # Ordem de caminho ~ ordem de aplicação (migração é prefixada por
     # timestamp/número), e é dela que sai a assimetria entre o fecho em bloco e
@@ -969,11 +1242,15 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
         achados += _achados_search_path(texto, rel, funcs)
         achados += _achados_tenant_param(texto, rel, funcs)
         achados += _achados_guarda_null_uid(texto, rel, funcs)
+        achados += _achados_param_sem_conferencia(texto, rel, funcs)
+        achados += _achados_comparacao_org_null(texto, rel, funcs)
         _coletar_execute(texto, rel, revogados, concedidos)
         _coletar_funcoes_definer(texto, rel, ordem, funcs, definidas,
                                  mencionados, bloco, defaults, helpers)
         _coletar_rls(texto, rel, criadas, com_rls)
+        _coletar_update_proprio(texto, rel, up)
 
+    achados += _achados_update_proprio(up)
     achados += _achados_sem_rls(criadas, com_rls)
     achados += _achados_revoke_incompleto(revogados, concedidos)
     achados += _achados_revoke_sem_public(revogados, concedidos)
