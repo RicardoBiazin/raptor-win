@@ -1204,6 +1204,52 @@ def _achados_update_proprio(up: dict) -> list[dict]:
     return achados
 
 
+# ---------------------------------------------------------------------------
+# IP de quem chama tirado do PRIMEIRO item do x-forwarded-for.
+#
+# O cabeçalho é montado em cadeia: cada proxy acrescenta o IP que viu, no fim.
+# Quem chama controla o começo, então o primeiro item é forjável: cada IP
+# inventado vira um balde novo no teto por IP. O último item é o que a borda
+# acrescentou. Incidente real: um teto de agendamento por IP que contava o
+# primeiro item, então um atacante ganhava um balde por requisição.
+# ---------------------------------------------------------------------------
+_RE_XFF = re.compile(r"x-forwarded-for", re.IGNORECASE)
+_RE_XFF_PRIMEIRO = re.compile(
+    # split_part(x, ',', 1)
+    r"split_part\s*\([^;]*?,\s*'\s*,\s*'\s*,\s*1\s*\)"
+    # (string_to_array(x, ','))[1]  ou  string_to_array(x, ',')[1]
+    r"|string_to_array\s*\([^;]*?,\s*'\s*,\s*'\s*\)\s*\)?\s*\[\s*1\s*\]"
+    # regexp_replace(x, '^([^,]*)...') / '^[^,]*': pega até a primeira vírgula
+    r"|'\^\(?\[\^,\]\*",
+    re.IGNORECASE,
+)
+
+
+def _achados_xff_primeiro_item(texto: str, rel: str, funcs: list[dict]) -> list[dict]:
+    achados: list[dict] = []
+    for f in funcs:
+        corpo = f["corpo"]
+        if not corpo.strip() or not _RE_XFF.search(corpo):
+            continue
+        m = _RE_XFF_PRIMEIRO.search(corpo)
+        if not m:
+            continue
+        achados.append({
+            "rule": "sql.ip-xff-primeiro-item",
+            "severity": "HIGH",
+            "context": "",
+            "path": rel,
+            "line": _linha(texto, f["ini_corpo"] + m.start()),
+            "message": (
+                f"`{f['nome']}(...)` lê o x-forwarded-for e fica com o PRIMEIRO item. "
+                f"Esse item é o que quem chama escreve: trocar o IP forjado a cada "
+                f"chamada cria um balde novo no teto por IP. Use o ÚLTIMO item (o "
+                f"que a borda acrescenta), por exemplo `regexp_replace(x, '^.*,', '')`."
+            ),
+        })
+    return achados
+
+
 def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
     # Duas fases: índice e policy se resolvem dentro de um arquivo, mas o
     # EXECUTE de uma função se decide entre migrações — o revoke numa, o grant
@@ -1244,6 +1290,7 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
         achados += _achados_guarda_null_uid(texto, rel, funcs)
         achados += _achados_param_sem_conferencia(texto, rel, funcs)
         achados += _achados_comparacao_org_null(texto, rel, funcs)
+        achados += _achados_xff_primeiro_item(texto, rel, funcs)
         _coletar_execute(texto, rel, revogados, concedidos)
         _coletar_funcoes_definer(texto, rel, ordem, funcs, definidas,
                                  mencionados, bloco, defaults, helpers)

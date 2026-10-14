@@ -1,0 +1,26 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # NAO e' regra do RAPTOR. O source map e' um JSON com `sourcesContent`, o
+  # codigo-fonte original, com comentarios e nomes que o bundle minificado
+  # apagou. Quem baixa o `.map` le a aplicacao inteira. A varredura de sites
+  # (`--url`) nao encontrou nenhum `.map` publicado: esta regra e' preventiva,
+  # para a CONFIGURACAO que o gera.
+  #
+  # Acusa `sourcemap: true` (vite) e `productionBrowserSourceMaps: true` (next).
+  # Em dev o mapa e' inofensivo; a preocupacao e' o build de producao.
+  # `sourcemap: 'hidden'` nao e' acusado: gera o mapa sem referencia, mas o
+  # arquivo continua no `dist`, entao confira se ele e' enviado.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.infra.sourcemap-producao
+    message: >-
+      Configuração que gera source map no build (`sourcemap: true` /
+      `productionBrowserSourceMaps: true`). O .map publicado contém o código-fonte
+      original. Em produção, desligue, ou gere sem referenciar e não publique o .map.
+    languages: [typescript, javascript]
+    severity: WARNING
+    patterns:
+      - pattern-regex: '(sourcemap\s*:\s*true|productionBrowserSourceMaps\s*:\s*true)'
+    metadata:
+      cwe: ["CWE-540: Inclusion of Sensitive Information in Source Code"]
+      owasp_top_10: ["A05:2021-Security Misconfiguration"]
+      tags: ["security", "source-map", "build", "information-disclosure"]

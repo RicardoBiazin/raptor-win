@@ -223,6 +223,15 @@ def _achados_valor(nome: str, valor: str, rel: str, linha: int) -> list[dict]:
                    "é o caminho de exfiltração que a CSP fecharia. Com Supabase, "
                    "liste `https://<ref>.supabase.co` E `wss://<ref>.supabase.co` "
                    "(o Realtime precisa do wss) em vez do curinga.")
+        # Dois projetos Supabase na mesma CSP: quase sempre é um ambiente de
+        # teste que foi parar na produção. Incidente real: a CSP de produção
+        # citava o projeto de staging, que não era o banco do site.
+        refs = set(re.findall(r"https://([a-z0-9]{20})\.supabase\.co", vl))
+        if len(refs) > 1:
+            achado("headers.csp-mais-de-um-projeto-supabase", "WARNING",
+                   f"A CSP cita {len(refs)} projetos Supabase ({', '.join(sorted(refs))}). "
+                   "Um deles costuma ser de teste que foi parar na produção: a CSP "
+                   "libera um host que o site não usa. Mantenha só o projeto do ambiente.")
         if "object-src" not in vl:
             achado("headers.csp-sem-object-src", "MEDIUM",
                    "sem `object-src 'none'`, `<object>`/`<embed>` continuam "

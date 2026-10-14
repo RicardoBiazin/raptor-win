@@ -499,6 +499,25 @@ Static analysis reports *possibilities*; you still validate exploitability.
     send mail or SMS from your domain and spend your AI quota. An outbound `Authorization` header to
     the provider does not count. Helper detection is by name on purpose: a generic `f(req)` would
     also match `corsFor(req)`.
+  - `sql.ip-xff-primeiro-item` (**HIGH**, SQL) — function that reads `x-forwarded-for` and keeps the
+    **first** item (`split_part(…, ',', 1)`, `string_to_array(…)[1]`, `'^([^,]*)'`). That item is written
+    by the caller, so an IP rate limit keyed on it gives each request a fresh bucket. The last item, which
+    the edge appends, is the one to use.
+  - `autenticacao/xff-primeiro-item` (**HIGH**, Semgrep) — the same mistake in JS/TS:
+    `x-forwarded-for … .split(',')[0]`.
+  - `autenticacao/captcha-falha-aberta` (**ERROR**, Semgrep) — captcha or secret check that **returns success**
+    when the secret is missing (`if (!secret) return true`, `if not secret: return True`). If the variable
+    disappears from production the protection goes away without an error. Fail closed; if a local mode is
+    needed, use an explicit flag.
+  - `infra/sourcemap-producao` (WARNING, Semgrep) — build config that emits source maps (`sourcemap: true`,
+    `productionBrowserSourceMaps: true`). The `.map` carries `sourcesContent`, the original code. Preventive:
+    the `--url` scan checks the published file, this checks the setting.
+  - `headers.csp-mais-de-um-projeto-supabase` (WARNING) — one CSP header naming two or more Supabase projects.
+    Usually one is a test environment that reached production, and the header opens a host the site does not use.
+  - `secrets.dado-pessoal-em-demo` (MEDIUM, `--secrets`) — a seed, mock, fixture or sample file with a
+    consumer-provider e-mail (gmail, hotmail, outlook, …) or a Brazilian mobile number with a real DDD. Demo
+    data copied from a real customer is personal data published with the code, and the credential scan does
+    not look for it.
 - `db_audit.py` — read-only live-catalog checks (`db.*`), authored for `raptor-win`. Reads only
   world-readable catalog relations; never writes. See `--db-audit` above.
 - Semgrep and its Registry packs are © r2c/Semgrep, used per their terms.

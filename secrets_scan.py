@@ -234,6 +234,41 @@ _PREFIXO_RE = re.compile(
     re.M)
 
 
+# Arquivo de demonstração (seed, mock, fixture): costuma nascer com dado de gente
+# de verdade copiado de um cliente, e o aviso de "credencial" nunca o pega. Incidente
+# real: o seed de demonstração de um front publicado tinha telefones com DDD real e
+# e-mails de provedor de consumo; nada disso é segredo, e o scanner não reclamava.
+_NOME_DEMO_RE = re.compile(r"(seed|demo|mock|fixture|exemplo|sample)", re.IGNORECASE)
+_EMAIL_CONSUMO_RE = re.compile(
+    r"[\w.+-]+@(gmail|hotmail|outlook|yahoo|icloud|live|bol|uol)\.com(\.br)?\b", re.IGNORECASE)
+_CELULAR_BR_RE = re.compile(r"\(\d{2}\)\s?9\d{4}-\d{4}")
+
+
+def _achados_dado_em_demo(texto: str, rel: str) -> list[dict]:
+    if not _NOME_DEMO_RE.search(Path(rel).name):
+        return []
+    achados: list[dict] = []
+    for nome, rx, exemplo in (
+        ("e-mail de provedor de consumo", _EMAIL_CONSUMO_RE, "example.com"),
+        ("celular com DDD", _CELULAR_BR_RE, "(11) 5550-xxxx"),
+    ):
+        m = rx.search(texto)
+        if not m:
+            continue
+        achados.append({
+            "rule": "secrets.dado-pessoal-em-demo",
+            "severity": "MEDIUM",
+            "context": "",
+            "path": rel,
+            "line": _linha_de(texto, m.start()),
+            "message": (
+                f"Arquivo de demonstração com {nome} (`{m.group(0)[:40]}`). Se for de "
+                f"uma pessoa real, é dado pessoal publicado (LGPD). Troque por "
+                f"{exemplo} e confirme que nenhum registro veio de cliente."),
+        })
+    return achados
+
+
 def _achados_prefixo_publico(texto: str, rel: str) -> list[dict]:
     """Variavel de prefixo publico cujo NOME anuncia um segredo.
 
@@ -294,6 +329,7 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
         texto_pref = _ler(arq)
         if texto_pref is not None:
             achados += _achados_prefixo_publico(texto_pref, rel_norm)
+            achados += _achados_dado_em_demo(texto_pref, rel_norm)
 
         # Arquivo de ambiente versionado, mas sem nenhum valor que pareça
         # credencial: o aviso continua (preventivo), com severidade honesta.

@@ -1127,6 +1127,43 @@ class UpdatePropriaLinhaTests(MultiArquivoMixin, unittest.TestCase):
         self.assertIn(UPDATE_PROPRIO, regras)
 
 
+XFF_PRIMEIRO = "sql.ip-xff-primeiro-item"
+
+
+def _ip_sql(expr: str) -> str:
+    return ("create or replace function public.ip_do_pedido()\n"
+            "returns text language plpgsql stable as $$\n"
+            "declare v_h text; begin\n"
+            "  v_h := current_setting('request.headers', true);\n"
+            f"  return coalesce({expr}, 'sem-ip');\n"
+            "end $$;\n")
+
+
+class XffPrimeiroItemTests(MultiArquivoMixin, unittest.TestCase):
+    """O IP do teto tirado do primeiro item do x-forwarded-for é forjável."""
+
+    def test_split_part_primeiro_item_acusa(self):
+        sql = _ip_sql("split_part(v_h::json ->> 'x-forwarded-for', ',', 1)")
+        self.assertIn(XFF_PRIMEIRO, self._rules(sql))
+
+    def test_string_to_array_primeiro_item_acusa(self):
+        sql = _ip_sql("(string_to_array(v_h::json ->> 'x-forwarded-for', ','))[1]")
+        self.assertIn(XFF_PRIMEIRO, self._rules(sql))
+
+    def test_regexp_primeiro_item_acusa(self):
+        sql = _ip_sql("regexp_replace(v_h::json ->> 'x-forwarded-for', '^([^,]*).*', '\1')")
+        self.assertIn(XFF_PRIMEIRO, self._rules(sql))
+
+    def test_ultimo_item_nao_acusa(self):
+        """A forma corrigida: descarta tudo até a última vírgula."""
+        sql = _ip_sql("trim(regexp_replace(v_h::json ->> 'x-forwarded-for', '^.*,', ''))")
+        self.assertNotIn(XFF_PRIMEIRO, self._rules(sql))
+
+    def test_sem_xff_nao_acusa(self):
+        sql = _ip_sql("split_part(v_h::json ->> 'user-agent', ',', 1)")
+        self.assertNotIn(XFF_PRIMEIRO, self._rules(sql))
+
+
 class ExecuteNuncaFechadoTests(MultiArquivoMixin, unittest.TestCase):
     """DEFINER que nenhum grant/revoke cita — no Supabase nasce aberta a `anon`.
 
@@ -1846,6 +1883,17 @@ class TestHeadersValorInseguro(_BaseHeaders):
         so_style = self._com("default-src 'self'; style-src 'self' 'unsafe-inline'")
         self.assertNotIn("headers.csp-unsafe-inline", so_style)
 
+    def test_csp_com_dois_projetos_supabase_acusa(self):
+        """Staging e produção na mesma CSP: um deles não é o banco do site."""
+        csp = ("default-src 'self'; connect-src 'self' https://aaaaaaaaaaaaaaaaaaaa.supabase.co "
+               "https://bbbbbbbbbbbbbbbbbbbb.supabase.co; object-src 'none'; frame-ancestors 'none'")
+        self.assertIn("headers.csp-mais-de-um-projeto-supabase", self._com(csp))
+
+    def test_csp_com_um_projeto_supabase_nao_acusa(self):
+        csp = ("default-src 'self'; connect-src 'self' https://aaaaaaaaaaaaaaaaaaaa.supabase.co "
+               "wss://aaaaaaaaaaaaaaaaaaaa.supabase.co; object-src 'none'; frame-ancestors 'none'")
+        self.assertNotIn("headers.csp-mais-de-um-projeto-supabase", self._com(csp))
+
     def test_unsafe_eval(self):
         self.assertIn("headers.csp-unsafe-eval", self._com("default-src 'self'; script-src 'unsafe-eval'"))
 
@@ -2552,6 +2600,128 @@ Deno.serve(async (req) => {
   const { nome } = await req.json()
   return new Response(JSON.stringify({ ola: nome }))
 })
+""", ".ts")
+        self.assertNotIn(self.ID, achados)
+
+
+class TestDadoPessoalEmDemo(unittest.TestCase):
+    """Seed/mock com dado de gente de verdade: o scanner de credenciais não pega."""
+    DADO = ("const cliente = { nome: 'Maria', email: 'maria@gmail.com', "
+            "telefone: '(11) 98765-4321' }\n")
+
+    def _achados(self, nome: str, texto: str) -> set:
+        import secrets_scan
+        d = Path(tempfile.mkdtemp())
+        (d / nome).write_text(texto, encoding="utf-8")
+        return {a["rule"] for a in secrets_scan.escanear([d], set())}
+
+    def test_seed_com_dado_real_acusa(self):
+        self.assertIn("secrets.dado-pessoal-em-demo", self._achados("demoSeed.ts", self.DADO))
+
+    def test_mesmo_conteudo_fora_de_demo_nao_acusa(self):
+        self.assertNotIn("secrets.dado-pessoal-em-demo", self._achados("app.ts", self.DADO))
+
+    def test_seed_anonimizado_nao_acusa(self):
+        limpo = ("const cliente = { nome: 'Maria', email: 'maria@example.com', "
+                 "telefone: '(11) 5550-1234' }\n")
+        self.assertNotIn("secrets.dado-pessoal-em-demo", self._achados("seed.ts", limpo))
+
+
+class TestRegraCaptchaFalhaAberta(_BaseRegras):
+    """Captcha que devolve sucesso quando o segredo falta."""
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "autenticacao"
+    ARQ = "captcha-falha-aberta.yaml"
+    ID = "captcha-falha-aberta"
+
+    def test_sem_segredo_passa_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+export async function verificar(token: string) {
+  const secret = process.env.TURNSTILE_SECRET_KEY
+  if (!secret) return true
+  const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST', body: JSON.stringify({ secret, response: token }) })
+  return (await r.json()).success
+}
+""", ".ts")
+        self.assertIn(self.ID, achados)
+
+    def test_sem_segredo_recusa_nao_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+export async function verificar(token: string) {
+  const secret = process.env.TURNSTILE_SECRET_KEY
+  if (!secret) return false
+  const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST', body: JSON.stringify({ secret, response: token }) })
+  return (await r.json()).success
+}
+""", ".ts")
+        self.assertNotIn(self.ID, achados)
+
+    def test_python_sem_segredo_passa_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+def verificar(token):
+    if not TURNSTILE_SECRET:
+        return True
+    return checar(token)
+""", ".py")
+        self.assertIn(self.ID, achados)
+
+    def test_retorno_de_objeto_com_ok_e_acusado(self):
+        achados = self._rodar(self.ARQ, """
+export function checar(segredo: string | undefined) {
+  if (!segredo) { return { ok: true } }
+  return { ok: true }
+}
+""", ".ts")
+        self.assertIn(self.ID, achados)
+
+
+class TestRegraXffPrimeiroItemJs(_BaseRegras):
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "autenticacao"
+    ARQ = "xff-primeiro-item.yaml"
+    ID = "xff-primeiro-item"
+
+    def test_primeiro_item_acusa(self):
+        achados = self._rodar(self.ARQ, """
+export function ipDe(req: Request) {
+  return req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? 'desconhecido'
+}
+""", ".ts")
+        self.assertIn(self.ID, achados)
+
+    def test_ultimo_item_nao_acusa(self):
+        achados = self._rodar(self.ARQ, """
+export function ipDe(req: Request) {
+  const lista = (req.headers.get('x-forwarded-for') ?? '').split(',')
+  return lista[lista.length - 1].trim()
+}
+""", ".ts")
+        self.assertNotIn(self.ID, achados)
+
+
+class TestRegraSourcemapProducao(_BaseRegras):
+    REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "infra"
+    ARQ = "sourcemap-producao.yaml"
+    ID = "sourcemap-producao"
+
+    def test_vite_sourcemap_true_acusa(self):
+        achados = self._rodar(self.ARQ, """
+import { defineConfig } from 'vite'
+export default defineConfig({ build: { sourcemap: true } })
+""", ".ts")
+        self.assertIn(self.ID, achados)
+
+    def test_next_productionBrowserSourceMaps_acusa(self):
+        achados = self._rodar(self.ARQ, """
+const nextConfig = { productionBrowserSourceMaps: true }
+export default nextConfig
+""", ".js")
+        self.assertIn(self.ID, achados)
+
+    def test_sem_mapa_nao_acusa(self):
+        achados = self._rodar(self.ARQ, """
+import { defineConfig } from 'vite'
+export default defineConfig({ build: { sourcemap: false } })
 """, ".ts")
         self.assertNotIn(self.ID, achados)
 

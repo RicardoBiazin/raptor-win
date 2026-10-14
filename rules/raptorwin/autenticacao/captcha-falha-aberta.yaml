@@ -1,0 +1,33 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # NAO e' regra do RAPTOR. Achado de revisao de codigo (projeto proprio, v0.9.0):
+  # a protecao Turnstile era pulada quando a variavel do segredo nao existia.
+  # Ninguem notaria, porque o site funcionava igual. Se a variavel sumisse do
+  # ambiente de producao, o limite de chamadas caia sem erro nenhum.
+  #
+  # O padrao e' o mesmo em qualquer linguagem: um `if` que confere a ausencia do
+  # segredo e DEVOLVE sucesso. O certo e' falhar fechado: sem segredo, a
+  # aplicacao recusa a requisicao protegida. Excecao de desenvolvimento local
+  # deve ser uma flag EXPLICITA, nunca a ausencia de variavel.
+  #
+  # Limite: e' regex sobre o texto. Um `if (!secret) return true` de outra logica
+  # (feature flag, por exemplo) tambem casa, por isso o nome exige
+  # turnstile/captcha/secret/segredo. Confira o contexto do achado.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.autenticacao.captcha-falha-aberta
+    message: >-
+      Verificação de captcha/segredo que devolve sucesso quando o segredo não
+      está configurado. Se a variável sumir do ambiente de produção, a proteção
+      é desligada sem erro nenhum. Falhe fechado: sem segredo, recuse a
+      requisição. Se precisar de um modo local, use uma flag explícita (ex.:
+      LOCAL=1) e nunca a ausência da variável.
+    languages: [typescript, javascript, python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern-regex: '(?i)if\s*\(?\s*!\s*[\w.]*(turnstile|captcha|secret|segredo)[\w.]*\s*\)?[^}\n]{0,160}?return\s+(true|\{\s*(ok|success)\s*:\s*true)'
+          - pattern-regex: '(?i)if\s+not\s+[\w.]*(turnstile|captcha|secret|segredo)[\w.]*\s*:\s*return\s+True'
+    metadata:
+      cwe: ["CWE-636: Not Failing Securely (Fail Open)"]
+      owasp_top_10: ["A04:2021-Insecure Design"]
+      tags: ["security", "captcha", "fail-open", "rate-limit"]

@@ -1,0 +1,29 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # IP de quem chama tirado do PRIMEIRO item do x-forwarded-for, em código JS/TS.
+  #
+  # NAO e' regra do RAPTOR. Versão JS da regra `sql.ip-xff-primeiro-item`
+  # (sql_lint.py): o cabeçalho é uma cadeia que cada proxy acrescenta ao FIM,
+  # então o começo é escrito por quem chama. Um limite por IP que lê o primeiro
+  # item deixa o cliente escolher o próprio balde a cada requisição.
+  #
+  # O correto é o último item (o que a borda acrescentou), ou um cabeçalho que
+  # a plataforma define e o cliente não consegue forjar (x-nf-client-connection-ip
+  # na Netlify, cf-connecting-ip na Cloudflare, quando confiável para o deploy).
+  #
+  # Limite: casa `x-forwarded-for` e `split(',')[0]` no mesmo trecho curto. Uma
+  # leitura em variável e split em outra linha passa sem achado.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.autenticacao.xff-primeiro-item
+    message: >-
+      O IP do limite vem do PRIMEIRO item do x-forwarded-for. Esse item é
+      escrito por quem chama: cada IP forjado vira um balde novo no teto. Use o
+      último item, ou um cabeçalho que a plataforma define e o cliente não forja.
+    languages: [typescript, javascript]
+    severity: HIGH
+    patterns:
+      - pattern-regex: 'x-forwarded-for[^;\n]{0,160}?\.split\(\s*.,.\s*\)\s*\[\s*0\s*\]'
+    metadata:
+      cwe: ["CWE-348: Use of Less Trusted Source"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      tags: ["security", "rate-limit", "spoofing", "x-forwarded-for"]
