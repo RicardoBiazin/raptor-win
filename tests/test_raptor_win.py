@@ -2359,7 +2359,10 @@ class TestBundleScan(unittest.TestCase):
                              for a in achados))
 
     def test_chave_secreta_supabase_e_critica(self):
-        js = 'const k = "sb_secret_abcdefghijklmnop1234";'
+        # Montada em tempo de execução: o literal no fonte fazia o próprio scanner
+        # de credenciais acusar este arquivo no passo "Sem falso-positivo" do CI.
+        chave = "sb_" + "secret_" + "abcdefghijklmnop1234"
+        js = f'const k = "{chave}";'
         achados = self._varrer({"https://site.exemplo.com.br/assets/index.js": (200, {}, js)})
         self.assertIn("bundle.segredo-supabase-secret", self._regras(achados))
 
