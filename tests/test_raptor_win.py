@@ -2627,6 +2627,39 @@ class TestDadoPessoalEmDemo(unittest.TestCase):
         self.assertNotIn("secrets.dado-pessoal-em-demo", self._achados("seed.ts", limpo))
 
 
+class TestRegraHrefEsquema(_BaseRegras):
+    """href dinâmico sem validar o esquema (javascript:/data: viram XSS)."""
+    ARQ = "href-scheme.yaml"
+    ID = "href-scheme-unvalidated"
+
+    def _jsx(self, expressao: str) -> set:
+        return self._rodar(self.ARQ, f"""
+export function Link({{ v }}: {{ v: string }}) {{
+  return <a href={{{expressao}}}>ver</a>;
+}}
+""", ".tsx")
+
+    def test_valor_dinamico_e_acusado(self):
+        self.assertIn(self.ID, self._jsx("v"))
+
+    def test_campo_de_objeto_e_acusado(self):
+        self.assertIn(self.ID, self._jsx("item.link"))
+
+    def test_funcao_que_nao_valida_continua_acusada(self):
+        self.assertIn(self.ID, self._jsx("formatar(v)"))
+
+    def test_validador_de_url_nao_e_acusado(self):
+        for chamada in ("safeUrl(v)", "sanitizeUrl(v)", "linkSeguro(v)", "isValidUrl(v)", "utils.safeHref(v)"):
+            with self.subTest(chamada=chamada):
+                self.assertNotIn(self.ID, self._jsx(chamada))
+
+    def test_template_de_caminho_interno_nao_e_acusado(self):
+        self.assertNotIn(self.ID, self._jsx("`/produtos/${v}`"))
+
+    def test_template_protocolo_relativo_continua_acusado(self):
+        self.assertIn(self.ID, self._jsx("`//${v}`"))
+
+
 class TestRegraCaptchaFalhaAberta(_BaseRegras):
     """Captcha que devolve sucesso quando o segredo falta."""
     REGRAS = Path(__file__).resolve().parent.parent / "rules" / "raptorwin" / "autenticacao"

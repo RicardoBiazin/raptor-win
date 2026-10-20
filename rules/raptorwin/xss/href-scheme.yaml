@@ -29,6 +29,15 @@ rules:
       - pattern-not: <a ... href="...">...</a>
       - pattern-not: <a href={"..."} />
       - pattern-not: <a ... href={"..."}>...</a>
+      # Also drop values that already went through a URL validator
+      # (safeUrl(v), sanitizeUrl(v), validUrl(v), linkSeguro(v)...) and template
+      # literals that start with a single "/" (an internal path, no scheme possible).
+      - metavariable-pattern:
+          metavariable: $V
+          patterns:
+            - pattern-regex: (?s).+
+            - pattern-not-regex: (?i)^\s*[\w.]*(seguro|safe|saniti[sz]e|valid)\w*\s*\(
+            - pattern-not-regex: ^\s*`/[^/]
     metadata:
       cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation (XSS)"]
       owasp_top_10: ["A03:2021-Injection"]
