@@ -278,6 +278,15 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--raptor-rules DIR` — point at a different RAPTOR rules folder (e.g. your own RAPTOR checkout).
 - `--exclude PATTERN` — extra exclusion (repeatable). `node_modules`, `.git`, `dist`, `venv`,
   `site-packages`, `.tox`, build/cache dirs, etc. are excluded by default.
+
+  **The scanned project does not decide the scope.** With Semgrep ≥ 1.95 the scan runs with
+  `--x-ignore-semgrepignore-files`: a `.semgrepignore` inside the target is ignored. Without it,
+  one line there made a file vanish from the report — and when the target had no such file,
+  Semgrep's built-in default skipped `test/` and `tests/`, so code behind a folder anyone can
+  create was never scanned (measured on 1.173: the same `innerHTML` sink found in `src/` was
+  silent in `tests/` and in an ignored file). The useful part of that default comes back as
+  explicit excludes (minified assets, lockfiles); `tests/` is scanned and labelled
+  `tooling/test` by the triage. Older Semgrep prints a warning. Same change as RAPTOR upstream.
 - `--baseline [FILE]` — **accepted risks**, checked instead of just documented. Reads
   `.raptor-baseline.toml` (or the file you name) and drops those findings from the `--fail-on`
   count. What makes it different from a plain ignore-list:

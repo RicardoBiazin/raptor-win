@@ -3545,3 +3545,39 @@ Deno.serve(async (req: Request) => {
 })
 """, ".ts")
         self.assertEqual(achados, set())
+
+
+# ---------------------------------------------------------------------------
+# O alvo não decide o escopo: .semgrepignore e o padrão embutido (tests/)
+# ---------------------------------------------------------------------------
+
+class TestEscopoNaoSteeravel(unittest.TestCase):
+    def test_flag_so_a_partir_da_1_95(self):
+        com = raptor_win.montar_cmd_semgrep("semgrep", ["c.yaml"], [Path("x")], [], (1, 173, 0))
+        sem = raptor_win.montar_cmd_semgrep("semgrep", ["c.yaml"], [Path("x")], [], (1, 90, 0))
+        ilegivel = raptor_win.montar_cmd_semgrep("semgrep", ["c.yaml"], [Path("x")], [], None)
+        self.assertIn("--x-ignore-semgrepignore-files", com)
+        self.assertNotIn("--x-ignore-semgrepignore-files", sem)
+        self.assertNotIn("--x-ignore-semgrepignore-files", ilegivel)
+        # o que o padrão embutido tinha de útil volta por exclusão explícita
+        self.assertIn("*.min.js", com)
+        self.assertIn("package-lock.json", com)
+
+    def test_semgrepignore_do_alvo_e_pasta_tests_nao_escondem_achado(self):
+        """Medido no Semgrep 1.173: sem a flag, `tests/` sumia pelo padrão
+        embutido e uma linha no `.semgrepignore` do alvo apagava o arquivo."""
+        sg = raptor_win.find_semgrep()
+        if not sg:
+            self.skipTest("semgrep não encontrado")
+        if (raptor_win.versao_semgrep(sg, {**os.environ, "PATH": str(Path(sg).parent) + os.pathsep + os.environ.get("PATH", "")})
+                or (0,)) < (1, 95, 0):
+            self.skipTest("semgrep < 1.95 não tem a flag")
+        d = Path(tempfile.mkdtemp())
+        for rel in ("src/x.js", "src/y.js", "tests/z.js"):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text("el.innerHTML = sujo\n", encoding="utf-8")
+        (d / ".semgrepignore").write_text("src/x.js\n", encoding="utf-8")
+        cfg = [str(raptor_win.WIN_RULES / "xss" / "dom-sinks.yaml")]
+        r = raptor_win.run_semgrep(sg, cfg, [d], [])
+        achados = {Path(x["path"]).name for x in r["results"]}
+        self.assertEqual(achados, {"x.js", "y.js", "z.js"})

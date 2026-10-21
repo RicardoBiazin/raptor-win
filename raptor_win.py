@@ -265,8 +265,45 @@ def severity_of(res: dict) -> str:
     return "INFO"
 
 
-def run_semgrep(semgrep: str, configs: list[str], targets: list[Path], excludes: list[str]) -> dict:
+# O ALVO não decide o que é varrido. Sem `--x-ignore-semgrepignore-files` o
+# Semgrep obedece a um `.semgrepignore` dentro do repositório escaneado -- uma
+# linha `src/x.js` ali e o arquivo some do relatório sem aviso -- e, quando o
+# repositório NÃO tem um, aplica o padrão embutido, que pula `test/` e `tests/`.
+# Medido no Semgrep 1.173: os dois casos escondiam o mesmo `innerHTML` que a
+# varredura achava em `src/`. Pasta de teste tem nome que qualquer um cria;
+# esconder código atrás dela é um `mkdir`. (Mesmo ajuste do RAPTOR upstream,
+# `packages/semgrep/runner.py`.)
+#
+# A flag desliga também o padrão embutido, então o que ele tinha de útil volta
+# por aqui: arquivo minificado e lockfile (dependência e build já estão em
+# SKIP_DIRS). `tests/` NÃO volta: quem decide se achado em teste importa é a
+# classificação de contexto, que o marca como tooling/test.
+_IGNORA_SEMGREPIGNORE_DESDE = (1, 95, 0)
+_EXCLUI_GERADOS = ("*.min.js", "*.min.css", "package-lock.json", "yarn.lock",
+                   "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "Cargo.lock",
+                   "composer.lock", "Gemfile.lock", "go.sum")
+_VERSAO_SEMGREP: dict[str, tuple[int, ...] | None] = {}
+
+
+def versao_semgrep(semgrep: str, env: dict | None = None) -> "tuple[int, ...] | None":
+    if semgrep not in _VERSAO_SEMGREP:
+        try:
+            out = subprocess.run([semgrep, "--version"], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=60, env=env)
+            m = re.search(r"(\d+)\.(\d+)\.(\d+)", out.stdout or "")
+            _VERSAO_SEMGREP[semgrep] = tuple(int(x) for x in m.groups()) if m else None
+        except (OSError, subprocess.SubprocessError):
+            _VERSAO_SEMGREP[semgrep] = None
+    return _VERSAO_SEMGREP[semgrep]
+
+
+def montar_cmd_semgrep(semgrep: str, configs: list[str], targets: list[Path],
+                       excludes: list[str], versao: "tuple[int, ...] | None") -> list[str]:
     cmd = [semgrep, "--json", "--metrics=off", "--quiet", "--disable-version-check"]
+    if versao is not None and versao >= _IGNORA_SEMGREPIGNORE_DESDE:
+        cmd.append("--x-ignore-semgrepignore-files")
+        for g in _EXCLUI_GERADOS:
+            cmd += ["--exclude", g]
     for c in configs:
         cmd += ["--config", c]
     for d in SKIP_DIRS:
@@ -274,7 +311,10 @@ def run_semgrep(semgrep: str, configs: list[str], targets: list[Path], excludes:
     for ex in excludes:
         cmd += ["--exclude", ex]
     cmd += [str(t) for t in targets]
+    return cmd
 
+
+def run_semgrep(semgrep: str, configs: list[str], targets: list[Path], excludes: list[str]) -> dict:
     # `semgrep.exe` é um invólucro: ele localiza as regras e delega a
     # análise a `pysemgrep`, que invoca PELO NOME PURO. Quando o pip
     # instalou em `%APPDATA%\Python\PythonXXX\Scripts` sem acrescentar
@@ -291,6 +331,13 @@ def run_semgrep(semgrep: str, configs: list[str], targets: list[Path], excludes:
     if pasta and pasta not in env.get("PATH", "").split(os.pathsep):
         env["PATH"] = pasta + os.pathsep + env.get("PATH", "")
 
+    versao = versao_semgrep(semgrep, env)
+    if versao is None or versao < _IGNORA_SEMGREPIGNORE_DESDE:
+        sys.stderr.write(
+            "aviso: semgrep anterior a 1.95 (ou versão ilegível) — um .semgrepignore no "
+            "projeto pode esconder arquivos, e test/ e tests/ ficam fora. "
+            "Atualize: python -m pip install --upgrade semgrep\n")
+    cmd = montar_cmd_semgrep(semgrep, configs, targets, excludes, versao)
     proc = subprocess.run(cmd, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", env=env)
     if not proc.stdout.strip():
