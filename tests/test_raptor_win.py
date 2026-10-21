@@ -3581,3 +3581,41 @@ class TestEscopoNaoSteeravel(unittest.TestCase):
         r = raptor_win.run_semgrep(sg, cfg, [d], [])
         achados = {Path(x["path"]).name for x in r["results"]}
         self.assertEqual(achados, {"x.js", "y.js", "z.js"})
+
+
+# ---------------------------------------------------------------------------
+# db_audit: função sem argumento avaliada por linha na policy
+# ---------------------------------------------------------------------------
+
+class TestPolicyFuncaoPorLinha(unittest.TestCase):
+    def _pol(self, qual="", with_check="", policy="p"):
+        return {"schema": "public", "tabela": "itens", "policy": policy, "permissiva": "PERMISSIVE",
+                "cmd": "SELECT", "papeis": "authenticated", "qual": qual, "with_check": with_check}
+
+    def _regras(self, linhas):
+        return [a for a in db_audit._achados_policies(linhas) if a["rule"] == "db.policy-funcao-por-linha"]
+
+    def test_funcao_propria_direto_e_acusada(self):
+        """A que o linter do Supabase NÃO cobre: só olha auth.uid()/auth.jwt()."""
+        a = self._regras([self._pol("pode_ver_comandas()")])
+        self.assertEqual(len(a), 1)
+        self.assertIn("(select pode_ver_comandas())", a[0]["message"])
+
+    def test_embrulhada_em_select_nao_e_acusada(self):
+        self.assertEqual(self._regras([self._pol("( SELECT pode_ver_comandas() AS pode_ver_comandas)")]), [])
+
+    def test_mistura_acusa_so_a_que_ficou_de_fora(self):
+        a = self._regras([self._pol("((user_id = ( SELECT auth.uid() AS uid)) OR eh_master())")])
+        self.assertEqual(len(a), 1)
+        self.assertIn("`eh_master()`", a[0]["message"])
+        self.assertNotIn("auth.uid", a[0]["message"])
+
+    def test_with_check_tambem_conta(self):
+        self.assertEqual(len(self._regras([self._pol(with_check="(auth.uid() = user_id)")])), 1)
+
+    def test_funcao_com_argumento_de_coluna_e_now_nao_sao_acusadas(self):
+        """Dependem da linha (ou são voláteis): não há o que cachear."""
+        for e in ("is_member(org_id)", "(created_at > (now() - '1 day'::interval))",
+                  "((ativo = true) AND (COALESCE(visivel_cardapio, true) = true))"):
+            with self.subTest(e=e):
+                self.assertEqual(self._regras([self._pol(e)]), [])

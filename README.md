@@ -246,6 +246,12 @@ Windows launcher (puts `semgrep` on PATH automatically):
   - `db.rls-enabled-no-policy` — **not a leak, a silent outage**: every query returns zero rows for
     non-owner roles. The message says so explicitly, so nobody "fixes" it by disabling RLS.
   - `db.policy-always-true-write`, `db.multiple-permissive-policies`.
+  - `db.policy-funcao-por-linha` (INFO, performance) — a zero-argument function called bare in a
+    policy (`using (pode_ver_comandas())`) runs **once per row**, even when STABLE; wrapped as
+    `(select f())` it becomes an initplan and runs once per query. The Supabase linter only checks
+    `auth.uid()`/`auth.jwt()`; this covers your own role-check functions too. Measured on a real
+    project: 1000 rows went from 85–158 ms to 1.2 ms. Functions taking a column argument depend on
+    the row and are not reported.
   - `db.extension-in-public` — reports `extrelocatable` **and branches on it**. A non-relocatable
     extension cannot be moved: `alter extension … set schema` fails with `0A000 … does not support
     SET SCHEMA`, so for those the finding says the migration *will fail* and that accepting it is a

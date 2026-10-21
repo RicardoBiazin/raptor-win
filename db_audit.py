@@ -516,6 +516,38 @@ _ACOES_ESCRITA = {"ALL", "INSERT", "UPDATE", "DELETE"}
 _PAPEIS_CLIENTE = {"anon", "authenticated", "public"}
 
 
+# Função SEM argumento chamada direto na expressão da policy. O Postgres a
+# avalia UMA VEZ POR LINHA — mesmo STABLE — a menos que ela venha embrulhada em
+# `(select f())`, que vira initplan e roda uma vez por consulta. É o conselho do
+# linter do Supabase para `auth.uid()`; vale igual para função própria do tipo
+# `pode_ver_comandas()`, que o linter NÃO cobre. Medido num projeto real, 1000
+# linhas sob `using (pode_ver_comandas())`: 85–158 ms; com `(select ...)`:
+# 1,2 ms. Função com argumento de coluna (`is_member(org_id)`) depende da linha
+# e fica de fora: aí não há o que cachear.
+_RE_SUBSELECT = re.compile(r"\(\s*SELECT\b[^()]*(?:\([^()]*\)[^()]*)*\)", re.IGNORECASE)
+_RE_CHAMADA_SEM_ARG = re.compile(r"\b((?:[a-z_][a-z0-9_]*\.)?[a-z_][a-z0-9_]*)\s*\(\s*\)", re.IGNORECASE)
+# Volátil de verdade ou barata demais para importar.
+_FUNCOES_LIVRES = {"now", "random", "gen_random_uuid", "clock_timestamp",
+                   "statement_timestamp", "transaction_timestamp", "timeofday"}
+
+
+def chamadas_por_linha(expr: str) -> list[str]:
+    """Funções sem argumento chamadas FORA de `(select ...)` na expressão."""
+    texto = expr or ""
+    anterior = None
+    while anterior != texto:          # subselect dentro de subselect
+        anterior = texto
+        texto = _RE_SUBSELECT.sub(" ", texto)
+    nomes = []
+    for m in _RE_CHAMADA_SEM_ARG.finditer(texto):
+        nome = m.group(1)
+        if nome.split(".")[-1].lower() in _FUNCOES_LIVRES:
+            continue
+        if nome not in nomes:
+            nomes.append(nome)
+    return nomes
+
+
 def _achados_policies(linhas: list) -> list[dict]:
     """Policy `true` em ação de escrita, e permissivas duplicadas de SELECT."""
     out: list[dict] = []
@@ -527,6 +559,24 @@ def _achados_policies(linhas: list) -> list[dict]:
         cliente = papeis & _PAPEIS_CLIENTE
         permissiva = _txt(r.get("permissiva")).upper().startswith("PERM")
         alvo, ctx = _pseudo(schema, tabela), _ctx(schema)
+
+        por_linha = chamadas_por_linha(_txt(r.get("qual")) + " " + _txt(r.get("with_check")))
+        if por_linha:
+            fns = ", ".join(f"`{f}()`" for f in por_linha)
+            out.append({
+                "rule": "db.policy-funcao-por-linha",
+                "severity": "INFO",
+                "context": ctx, "path": alvo, "line": 0,
+                "message": (
+                    f"A policy `{policy}` de `{schema}.{tabela}` chama {fns} direto "
+                    f"na expressão: o Postgres avalia a função uma vez POR LINHA, "
+                    f"mesmo marcada STABLE. Embrulhe em subconsulta — "
+                    f"`using ((select {por_linha[0]}()))` — e ela vira initplan, "
+                    f"avaliada uma vez por consulta. Medido num projeto real: 1000 "
+                    f"linhas caíram de 85–158 ms para 1,2 ms. O resultado é o "
+                    f"mesmo, porque a função não depende da linha."
+                ),
+            })
 
         if permissiva and cmd in _ACOES_ESCRITA and cliente:
             check = _txt(r.get("with_check")) or _txt(r.get("qual"))
