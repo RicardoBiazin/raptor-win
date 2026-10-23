@@ -1,5 +1,5 @@
 # raptor-win só precisa do Semgrep (que traz suas próprias dependências).
-semgrep==1.173.0
+semgrep==1.182.1
 
 # VERSAO FIXA (21/08/2026): faixa nao e' consultavel pelo OSV, e uma ferramenta
 # de seguranca que nao consegue medir a propria dependencia nao tem autoridade
