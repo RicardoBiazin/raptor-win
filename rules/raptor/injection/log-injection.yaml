@@ -1,16 +1,18 @@
+# CWE-117 concerns the serialized record boundary, not format-string safety.
+# Generic logger receivers assume line-oriented text; confirm their encoder.
+# Sanitizer contracts assume standard string operations, not custom overrides.
 rules:
   # ---------------------------------------------------------------------------
-  # Python — taint: web framework sources → logging format-string position
+  # Python — taint: web framework sources → logging message/arguments
   # CWE-117: Log Injection / Log Forging via CRLF in log messages.
-  # Only fires when user input IS the format string / message, NOT when it
-  # is a format argument (logging.info("User: %s", user_input) is safe).
+  # Parameterization defers formatting; it does not escape CR/LF in %s.
   # ---------------------------------------------------------------------------
   - id: raptor.injection.log-injection.taint.python
     message: >-
       Untrusted data flows into the log message string. An attacker can
       inject CRLF sequences to forge log entries or corrupt log parsers.
-      Sanitise newlines before logging, or pass user data as format
-      arguments (logging.info("User: %s", user_input)).
+      Strip or encode CR/LF for the final output format. Parameterized
+      messages alone do not escape newlines; verify the configured encoder.
     languages: [python]
     severity: MEDIUM
     mode: taint
@@ -71,12 +73,290 @@ rules:
       - patterns:
           - pattern: $LOGGER.critical($MSG, ...)
           - focus-metavariable: $MSG
+      # Constant formats (including propagated aliases) are checked per value.
+      # Positions 1–4 are modeled; ambiguous formats stay conservative.
+      # Require exact positional arity (keywords may follow), or inline maps
+      # using at most two distinct identifier keys. Unsupported conversions,
+      # missing keys and duplicate/expanded bindings do not prove a sink.
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $VALUE, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $VALUE, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+$",
+                $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $VALUE, $ARG2, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $VALUE, $ARG2, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+$", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+$", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $VALUE, $ARG2, $ARG3, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $VALUE, $ARG2, $ARG3, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+$",
+                $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, $ARG3, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, $ARG3, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+$",
+                $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $VALUE, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $VALUE, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+(?:%[#0
+                +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+$", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $VALUE, $ARG2, $ARG3, $ARG4, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $VALUE, $ARG2, $ARG3, $ARG4, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+$", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, $ARG3, $ARG4, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, $ARG3, $ARG4, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+$", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $VALUE, $ARG4, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $VALUE, $ARG4, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+(?:%[#0
+                +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+$",
+                $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $ARG3, $VALUE, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $ARG3, $VALUE, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa](?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+$", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $VALUE, $ARG2, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $VALUE, $ARG2, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[diouxXeEfFgG](?:[^%]|%%)*+$", $FORMAT)
+          - metavariable-regex:
+              metavariable: $ARG2
+              regex: ^-?(?:0|[1-9][0-9]{0,6})$
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, ...)
+          - pattern-not: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, $EXCESS, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+%[#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[diouxXeEfFgG](?:[^%]|%%)*+(?:%[#0 +-]*[0-9]{0,6}(?:[.]0*[1-9][0-9]{0,5})?s|%[#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?c)(?:[^%]|%%)*+$", $FORMAT)
+          - metavariable-regex:
+              metavariable: $ARG1
+              regex: ^-?(?:0|[1-9][0-9]{0,6})$
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: '$LOGGER.$METHOD($FORMAT, {..., $KEY: $VALUE, ...})'
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-regex:
+              metavariable: $KEY
+              constant-propagation: false
+              regex: ^(?:"[A-Za-z_][A-Za-z0-9_]*"|'[A-Za-z_][A-Za-z0-9_]*')$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?P<K>[A-Za-z_][A-Za-z0-9_]*)@(?:[^%]|%%|%[(](?P=K)[)][#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsac])*+$",
+                f"{$KEY}@{$FORMAT}")
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?P<K>[A-Za-z_][A-Za-z0-9_]*)@(?:[^%]|%%|%[(](?P=K)[)][#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsac])*?%[(](?P=K)[)][#0
+                +-]*[0-9]{0,6}(?:(?:[.]0*[1-9][0-9]{0,5})?s|(?:[.][0-9]{0,6})?c)", f"{$KEY}@{$FORMAT}")
+          - pattern-not: '$LOGGER.$METHOD($FORMAT, {..., $KEY: $FIRST_VALUE, ..., $KEY: $LAST_VALUE, ...})'
+          - pattern-not: $LOGGER.$METHOD($FORMAT, {..., **$REST, ...})
+          - metavariable-comparison:
+              comparison: >-
+                re.match("(?s).*", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: '$LOGGER.$METHOD($FORMAT, {..., $KEY: $VALUE, $OTHER: $OTHER_VALUE, ...})'
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warning|error|debug|critical|exception)$
+          - metavariable-regex:
+              metavariable: $KEY
+              constant-propagation: false
+              regex: ^(?:"[A-Za-z_][A-Za-z0-9_]*"|'[A-Za-z_][A-Za-z0-9_]*')$
+          - metavariable-regex:
+              metavariable: $OTHER
+              constant-propagation: false
+              regex: ^(?:"[A-Za-z_][A-Za-z0-9_]*"|'[A-Za-z_][A-Za-z0-9_]*')$
+          - metavariable-comparison:
+              comparison: >-
+                $KEY != $OTHER
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?P<K>[A-Za-z_][A-Za-z0-9_]*)@(?P<O>[A-Za-z_][A-Za-z0-9_]*)@(?:[^%]|%%|(?:%[(](?P=K)[)][#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsac]|%[(](?P=O)[)][#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa]))*+$", f"{$KEY}@{$OTHER}@{$FORMAT}")
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?P<K>[A-Za-z_][A-Za-z0-9_]*)@(?P<O>[A-Za-z_][A-Za-z0-9_]*)@(?:[^%]|%%|(?:%[(](?P=K)[)][#0
+                +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsac]|%[(](?P=O)[)][#0 +-]*[0-9]{0,6}(?:[.][0-9]{0,6})?[rsa]))*?%[(](?P=K)[)][#0
+                +-]*[0-9]{0,6}(?:(?:[.]0*[1-9][0-9]{0,5})?s|(?:[.][0-9]{0,6})?c)", f"{$KEY}@{$OTHER}@{$FORMAT}")
+          - pattern-not: '$LOGGER.$METHOD($FORMAT, {..., $KEY: $FIRST_VALUE, ..., $KEY: $LAST_VALUE, ...})'
+          - pattern-not: '$LOGGER.$METHOD($FORMAT, {..., $OTHER: $FIRST_VALUE, ..., $OTHER: $LAST_VALUE, ...})'
+          - pattern-not: $LOGGER.$METHOD($FORMAT, {..., **$REST, ...})
+          - metavariable-comparison:
+              comparison: >-
+                re.match("(?s).*", $FORMAT)
+          - focus-metavariable: $VALUE
     # A sanitizer must handle BOTH \n and \r — a single-character
     # replace (or a "\r\n" pair replace) still lets the other bare
     # character forge entries.
+    # Literal CR/LF value contracts, shared with header sanitization.
+    # Guarded assignment results preserve safe locals on Semgrep 1.177.
+    # Dynamic/encoded literals remain conservative; normalization is allowed
+    # only when the outer operation removes the introduced control.
     pattern-sanitizers:
-      - pattern: $X.replace("\n", ...).replace("\r", ...)
-      - pattern: $X.replace("\r", ...).replace("\n", ...)
+      - patterns:
+          - pattern-either:
+              - pattern: $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+              - pattern: $X.replace($FIRST, $INNER).replace($SECOND, $OUTER, -1)
+              - pattern: $X.replace($FIRST, $INNER, -1).replace($SECOND, $OUTER)
+              - pattern: $X.replace($FIRST, $INNER, -1).replace($SECOND, $OUTER, -1)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER, -1)
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER, -1).replace($SECOND, $OUTER)
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER, -1).replace($SECOND, $OUTER, -1)
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $INNER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"tr])*"|'(?:[^'\\\r\n]|\\[\\'tr])*')$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"t])*"|'(?:[^'\\\r\n]|\\[\\'t])*')$
+          - metavariable-regex:
+              metavariable: $FIRST
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\n"|'\\n')$
+          - metavariable-regex:
+              metavariable: $SECOND
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\r"|'\\r')$
+        exact: true
+      - patterns:
+          - pattern-either:
+              - pattern: $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+              - pattern: $X.replace($FIRST, $INNER).replace($SECOND, $OUTER, -1)
+              - pattern: $X.replace($FIRST, $INNER, -1).replace($SECOND, $OUTER)
+              - pattern: $X.replace($FIRST, $INNER, -1).replace($SECOND, $OUTER, -1)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER, -1)
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER, -1).replace($SECOND, $OUTER)
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER, -1).replace($SECOND, $OUTER, -1)
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $INNER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"tn])*"|'(?:[^'\\\r\n]|\\[\\'tn])*')$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"t])*"|'(?:[^'\\\r\n]|\\[\\'t])*')$
+          - metavariable-regex:
+              metavariable: $FIRST
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\r"|'\\r')$
+          - metavariable-regex:
+              metavariable: $SECOND
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\n"|'\\n')$
+        exact: true
     metadata:
       cwe: ["CWE-117"]
       owasp_top_10: ["A9:2021-Security Logging and Monitoring Failures"]
@@ -89,7 +369,7 @@ rules:
     message: >-
       Untrusted data flows into the log format string. An attacker can
       inject newlines to forge log entries. Sanitise newlines before
-      logging, or use structured logging (slog) with typed fields.
+      logging, or use a handler that encodes message and field values.
     languages: [go]
     severity: MEDIUM
     mode: taint
@@ -135,19 +415,16 @@ rules:
       - patterns:
           - pattern: log.Print($MSG, ...)
           - focus-metavariable: $MSG
-      # slog — structured logger message string
+      # Print/Println serialize every argument without quoting strings.
       - patterns:
-          - pattern: slog.Info($MSG, ...)
-          - focus-metavariable: $MSG
-      - patterns:
-          - pattern: slog.Warn($MSG, ...)
-          - focus-metavariable: $MSG
-      - patterns:
-          - pattern: slog.Error($MSG, ...)
-          - focus-metavariable: $MSG
-      - patterns:
-          - pattern: slog.Debug($MSG, ...)
-          - focus-metavariable: $MSG
+          - pattern-either:
+              - pattern: log.Print(..., $VALUE, ...)
+              - pattern: log.Println(..., $VALUE, ...)
+              - pattern: $LOGGER.Print(..., $VALUE, ...)
+              - pattern: $LOGGER.Println(..., $VALUE, ...)
+          - focus-metavariable: $VALUE
+      # Standard slog TextHandler/JSONHandler encode messages and fields.
+      # Custom handlers are not inferred from the slog API name here.
       # Logger instance
       - patterns:
           - pattern: $LOGGER.Printf($FMT, ...)
@@ -155,11 +432,184 @@ rules:
       - patterns:
           - pattern: $LOGGER.Println($MSG, ...)
           - focus-metavariable: $MSG
+      # Constant formats (including propagated aliases) are checked per value.
+      # Positions 1–4 are modeled; ambiguous formats stay conservative.
+      # Simple verbs and fully indexed verbs are separate: explicit indexing
+      # suppresses EXTRA diagnostics. Width/star and mixed indexing need a
+      # separate model; q/x/X/T encode strings, other verbs may print raw data.
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:Printf|Fatalf|Panicf)$
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+)*+$", $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or (re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+){0}%(?![qxXT])[A-Za-z]", $FORMAT)
+                or re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+){0,0}$", $FORMAT))
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:Printf|Fatalf|Panicf)$
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+)*+$", $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or (re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+){1}%(?![qxXT])[A-Za-z]", $FORMAT)
+                or re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+){0,1}$", $FORMAT))
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:Printf|Fatalf|Panicf)$
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+)*+$", $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or (re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+){2}%(?![qxXT])[A-Za-z]", $FORMAT)
+                or re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+){0,2}$", $FORMAT))
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $ARG3, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:Printf|Fatalf|Panicf)$
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+)*+$", $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or (re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+){3}%(?![qxXT])[A-Za-z]", $FORMAT)
+                or re.match("^(?:[^%]|%%)*+(?:%[A-Za-z](?:[^%]|%%)*+){0,3}$", $FORMAT))
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:Printf|Fatalf|Panicf)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[[][1-9][0-9]{0,5}[]][A-Za-z](?:[^%]|%%)*+)++$", $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[[][1-9][0-9]{0,5}[]][A-Za-z](?:[^%]|%%)*+)*?%[[]1[]](?![qxXT])[A-Za-z]",
+                $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:Printf|Fatalf|Panicf)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[[][1-9][0-9]{0,5}[]][A-Za-z](?:[^%]|%%)*+)++$", $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[[][1-9][0-9]{0,5}[]][A-Za-z](?:[^%]|%%)*+)*?%[[]2[]](?![qxXT])[A-Za-z]",
+                $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:Printf|Fatalf|Panicf)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[[][1-9][0-9]{0,5}[]][A-Za-z](?:[^%]|%%)*+)++$", $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[[][1-9][0-9]{0,5}[]][A-Za-z](?:[^%]|%%)*+)*?%[[]3[]](?![qxXT])[A-Za-z]",
+                $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $LOGGER.$METHOD($FORMAT, $ARG1, $ARG2, $ARG3, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:Printf|Fatalf|Panicf)$
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[[][1-9][0-9]{0,5}[]][A-Za-z](?:[^%]|%%)*+)++$", $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                re.match("^(?:[^%]|%%)*+(?:%[[][1-9][0-9]{0,5}[]][A-Za-z](?:[^%]|%%)*+)*?%[[]4[]](?![qxXT])[A-Za-z]",
+                $FORMAT)
+          - focus-metavariable: $VALUE
     # Both \n and \r must be handled — a single ReplaceAll leaves the
     # other character usable for forging.
+    # Literal CR/LF value contracts, shared with header sanitization.
+    # Guarded assignment results preserve safe locals on Semgrep 1.177.
+    # Dynamic/encoded literals remain conservative; normalization is allowed
+    # only when the outer operation removes the introduced control.
     pattern-sanitizers:
-      - pattern: strings.ReplaceAll(strings.ReplaceAll($X, "\n", ...), "\r", ...)
-      - pattern: strings.ReplaceAll(strings.ReplaceAll($X, "\r", ...), "\n", ...)
+      - patterns:
+          - pattern-either:
+              - pattern: strings.ReplaceAll(strings.ReplaceAll($X, $FIRST, $INNER), $SECOND, $OUTER)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE := strings.ReplaceAll(strings.ReplaceAll($X, $FIRST, $INNER), $SECOND, $OUTER)
+                      - pattern: $SAFE = strings.ReplaceAll(strings.ReplaceAll($X, $FIRST, $INNER), $SECOND, $OUTER)
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $INNER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"tr])*")$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"t])*")$
+          - metavariable-regex:
+              metavariable: $FIRST
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\n")$
+          - metavariable-regex:
+              metavariable: $SECOND
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\r")$
+        exact: true
+      - patterns:
+          - pattern-either:
+              - pattern: strings.ReplaceAll(strings.ReplaceAll($X, $FIRST, $INNER), $SECOND, $OUTER)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE := strings.ReplaceAll(strings.ReplaceAll($X, $FIRST, $INNER), $SECOND, $OUTER)
+                      - pattern: $SAFE = strings.ReplaceAll(strings.ReplaceAll($X, $FIRST, $INNER), $SECOND, $OUTER)
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $INNER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"tn])*")$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"t])*")$
+          - metavariable-regex:
+              metavariable: $FIRST
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\r")$
+          - metavariable-regex:
+              metavariable: $SECOND
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\n")$
+        exact: true
     metadata:
       cwe: ["CWE-117"]
       owasp_top_10: ["A9:2021-Security Logging and Monitoring Failures"]
@@ -171,9 +621,9 @@ rules:
   - id: raptor.injection.log-injection.taint.java
     message: >-
       Untrusted data flows into the log message string. An attacker can
-      inject CRLF sequences to forge log entries. Sanitise newlines or
-      use structured logging with parameterised messages
-      (logger.info("User: {}", userInput)).
+      inject CRLF sequences to forge log entries in plain-text output.
+      Strip or encode CR/LF for the final output format. Parameterized
+      messages alone do not escape newlines; verify the configured encoder.
     languages: [java]
     severity: MEDIUM
     mode: taint
@@ -205,13 +655,148 @@ rules:
       - patterns:
           - pattern: (Logger $LOG).trace($MSG, ...)
           - focus-metavariable: $MSG
+      # Constant formats (including propagated aliases) are checked per value.
+      # Positions 1–4 are modeled; ambiguous formats stay conservative.
+      # Require enough unescaped {} placeholders. Generic Logger types cannot
+      # establish the message factory or its backslash escaping semantics.
+      - patterns:
+          - pattern: (Logger $LOGGER).$METHOD($FORMAT, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warn|error|debug|trace)$
+          - metavariable-comparison:
+              comparison: >-
+                "\\" not in $FORMAT
+          - metavariable-comparison:
+              comparison: >-
+                re.match("(?s)^(?:(?:(?![{][}]).)*+[{][}]){1}", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: (Logger $LOGGER).$METHOD($FORMAT, $ARG1, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warn|error|debug|trace)$
+          - metavariable-comparison:
+              comparison: >-
+                "\\" not in $FORMAT
+          - metavariable-comparison:
+              comparison: >-
+                re.match("(?s)^(?:(?:(?![{][}]).)*+[{][}]){2}", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: (Logger $LOGGER).$METHOD($FORMAT, $ARG1, $ARG2, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warn|error|debug|trace)$
+          - metavariable-comparison:
+              comparison: >-
+                "\\" not in $FORMAT
+          - metavariable-comparison:
+              comparison: >-
+                re.match("(?s)^(?:(?:(?![{][}]).)*+[{][}]){3}", $FORMAT)
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: (Logger $LOGGER).$METHOD($FORMAT, $ARG1, $ARG2, $ARG3, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:info|warn|error|debug|trace)$
+          - metavariable-comparison:
+              comparison: >-
+                "\\" not in $FORMAT
+          - metavariable-comparison:
+              comparison: >-
+                re.match("(?s)^(?:(?:(?![{][}]).)*+[{][}]){4}", $FORMAT)
+          - focus-metavariable: $VALUE
     # Both \n and \r must be handled — the regex-class replaceAll does,
     # single-character replaces only qualify chained in both orders.
+    # Literal CR/LF value contracts, shared with header sanitization.
+    # Guarded assignment results preserve safe locals on Semgrep 1.177.
+    # Dynamic/encoded literals remain conservative; normalization is allowed
+    # only when the outer operation removes the introduced control.
     pattern-sanitizers:
-      - pattern: $X.replaceAll("[\n\r]", ...)
-      - pattern: $X.replaceAll("[\r\n]", ...)
-      - pattern: $X.replace("\n", ...).replace("\r", ...)
-      - pattern: $X.replace("\r", ...).replace("\n", ...)
+      - patterns:
+          - pattern-either:
+              - pattern: $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER);
+                      - pattern: String $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER);
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $INNER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"tr])*")$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"t])*")$
+          - metavariable-regex:
+              metavariable: $FIRST
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\n")$
+          - metavariable-regex:
+              metavariable: $SECOND
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\r")$
+        exact: true
+      - patterns:
+          - pattern-either:
+              - pattern: $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER);
+                      - pattern: String $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER);
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $INNER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"tn])*")$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n]|\\[\\"t])*")$
+          - metavariable-regex:
+              metavariable: $FIRST
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\r")$
+          - metavariable-regex:
+              metavariable: $SECOND
+              constant-propagation: false
+              regex: >-
+                ^(?:"\\n")$
+        exact: true
+      - patterns:
+          - pattern-either:
+              - pattern: $X.replaceAll($SEARCH, $OUTER)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE = $X.replaceAll($SEARCH, $OUTER);
+                      - pattern: String $SAFE = $X.replaceAll($SEARCH, $OUTER);
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $SEARCH
+              constant-propagation: false
+              regex: >-
+                ^"\[(?:\\{1,2}r\\{1,2}n|\\{1,2}n\\{1,2}r)\]"$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n$]|\\[\\"t])*")$
+        exact: true
     metadata:
       cwe: ["CWE-117"]
       owasp_top_10: ["A9:2021-Security Logging and Monitoring Failures"]
@@ -224,7 +809,7 @@ rules:
     message: >-
       Untrusted data flows into a log message. An attacker can inject
       newlines to forge log entries or corrupt log parsers. Sanitise
-      newlines before logging.
+      newlines or use an encoder that escapes them in the final output.
     languages: [javascript, typescript]
     severity: MEDIUM
     mode: taint
@@ -274,7 +859,7 @@ rules:
       - patterns:
           - pattern: console.info($MSG, ...)
           - focus-metavariable: $MSG
-      # winston / bunyan / pino logger instances
+      # Generic application loggers; verify the concrete output encoder.
       - patterns:
           - pattern: $LOGGER.info($MSG, ...)
           - focus-metavariable: $MSG
@@ -287,14 +872,167 @@ rules:
       - patterns:
           - pattern: $LOGGER.debug($MSG, ...)
           - focus-metavariable: $MSG
+      # Constant formats (including propagated aliases) are checked per value.
+      # Positions 1–4 are modeled; ambiguous formats stay conservative.
+      # Node console formatting consumes known directives; surplus strings
+      # are appended. JSON/inspect/numeric/CSS directives do not print raw strings.
+      - patterns:
+          - pattern: console.$METHOD($FORMAT, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:log|warn|error|info|debug)$
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+)*+$",
+                $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or (re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+){0}%s",
+                $FORMAT) or re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+){0,0}$",
+                $FORMAT))
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: console.$METHOD($FORMAT, $ARG1, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:log|warn|error|info|debug)$
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+)*+$",
+                $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or (re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+){1}%s",
+                $FORMAT) or re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+){0,1}$",
+                $FORMAT))
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: console.$METHOD($FORMAT, $ARG1, $ARG2, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:log|warn|error|info|debug)$
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+)*+$",
+                $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or (re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+){2}%s",
+                $FORMAT) or re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+){0,2}$",
+                $FORMAT))
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: console.$METHOD($FORMAT, $ARG1, $ARG2, $ARG3, $VALUE, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(?:log|warn|error|info|debug)$
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+)*+$",
+                $FORMAT)
+          - metavariable-comparison:
+              comparison: >-
+                ($FORMAT == "") or (re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+){3}%s",
+                $FORMAT) or re.match("^(?:[^%]|%%|%(?![%sdifjoOcO]))*+(?:%[sdifjoOc](?:[^%]|%%|%(?![%sdifjoOcO]))*+){0,3}$",
+                $FORMAT))
+          - focus-metavariable: $VALUE
     # Both \n and \r must be handled — the character-class replace
     # does, single-character replaces only qualify chained in both
     # orders.
+    # Literal CR/LF value contracts, shared with header sanitization.
+    # Guarded assignment results preserve safe locals on Semgrep 1.177.
+    # Dynamic/encoded literals remain conservative; normalization is allowed
+    # only when the outer operation removes the introduced control.
     pattern-sanitizers:
-      - pattern: $X.replace(/[\r\n]/g, ...)
-      - pattern: $X.replace(/[\n\r]/g, ...)
-      - pattern: $X.replace(/\n/g, ...).replace(/\r/g, ...)
-      - pattern: $X.replace(/\r/g, ...).replace(/\n/g, ...)
+      - patterns:
+          - pattern-either:
+              - pattern: $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                      - pattern: const $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                      - pattern: let $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                      - pattern: var $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $INNER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n$]|\\[\\"tr])*"|'(?:[^'\\\r\n$]|\\[\\'tr])*')$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n$]|\\[\\"t])*"|'(?:[^'\\\r\n$]|\\[\\'t])*')$
+          - metavariable-regex:
+              metavariable: $FIRST
+              constant-propagation: false
+              regex: >-
+                ^/\\n/(?=[gimsu]*g)[gimsu]*$
+          - metavariable-regex:
+              metavariable: $SECOND
+              constant-propagation: false
+              regex: >-
+                ^/\\r/(?=[gimsu]*g)[gimsu]*$
+        exact: true
+      - patterns:
+          - pattern-either:
+              - pattern: $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                      - pattern: const $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                      - pattern: let $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                      - pattern: var $SAFE = $X.replace($FIRST, $INNER).replace($SECOND, $OUTER)
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $INNER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n$]|\\[\\"tn])*"|'(?:[^'\\\r\n$]|\\[\\'tn])*')$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n$]|\\[\\"t])*"|'(?:[^'\\\r\n$]|\\[\\'t])*')$
+          - metavariable-regex:
+              metavariable: $FIRST
+              constant-propagation: false
+              regex: >-
+                ^/\\r/(?=[gimsu]*g)[gimsu]*$
+          - metavariable-regex:
+              metavariable: $SECOND
+              constant-propagation: false
+              regex: >-
+                ^/\\n/(?=[gimsu]*g)[gimsu]*$
+        exact: true
+      - patterns:
+          - pattern-either:
+              - pattern: $X.replace($CLASS, $OUTER)
+              - patterns:
+                  - pattern-either:
+                      - pattern: $SAFE = $X.replace($CLASS, $OUTER)
+                      - pattern: const $SAFE = $X.replace($CLASS, $OUTER)
+                      - pattern: let $SAFE = $X.replace($CLASS, $OUTER)
+                      - pattern: var $SAFE = $X.replace($CLASS, $OUTER)
+                  - metavariable-regex:
+                      metavariable: $SAFE
+                      regex: ^[A-Za-z_$][A-Za-z0-9_$]*$
+          - metavariable-regex:
+              metavariable: $CLASS
+              constant-propagation: false
+              regex: >-
+                ^/\[(?:\\r\\n|\\n\\r)\]/(?=[gimsu]*g)[gimsu]*$
+          - metavariable-regex:
+              metavariable: $OUTER
+              constant-propagation: false
+              regex: >-
+                ^(?:"(?:[^"\\\r\n$]|\\[\\"t])*"|'(?:[^'\\\r\n$]|\\[\\'t])*')$
+        exact: true
     metadata:
       cwe: ["CWE-117"]
       owasp_top_10: ["A9:2021-Security Logging and Monitoring Failures"]
