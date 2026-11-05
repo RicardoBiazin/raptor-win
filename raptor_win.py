@@ -32,6 +32,7 @@ from collections import Counter, defaultdict
 
 import baseline as baseline_mod
 import bundle_scan
+import relatorio
 import db_audit
 import headers_lint
 import supply_chain
@@ -1464,6 +1465,12 @@ def main() -> int:
     ap.add_argument("--md", metavar="FILE", help="escreve relatório Markdown")
     ap.add_argument("--sarif", metavar="FILE", help="escreve SARIF 2.1.0 (upload no GitHub Code Scanning)")
     ap.add_argument("--json-out", metavar="FILE", help="escreve o JSON bruto do Semgrep")
+    ap.add_argument("--executivo", action="store_true",
+                    help="nota 0-100 e resumo executivo (console e --md), com prompts de correção por achado")
+    ap.add_argument("--html", metavar="FILE",
+                    help="escreve relatório HTML: nota, checklist OWASP/LGPD e prompts de correção")
+    ap.add_argument("--logo", metavar="IMG",
+                    help="logo do cliente no --html (PNG, JPG, WEBP ou SVG; até 2 MB)")
     ap.add_argument("--changed", metavar="REF", help="escanear só arquivos alterados desde <ref> git (ex.: origin/main)")
     ap.add_argument("--sca", action="store_true", help="também checar dependências vulneráveis (requirements.txt / package-lock.json) via OSV.dev")
     ap.add_argument("--secrets", action="store_true", help="também procurar credenciais no repositório e arquivos de segredo fora do .gitignore")
@@ -1493,6 +1500,8 @@ def main() -> int:
         ap.error("informe ao menos um alvo local ou --url")
     if args.changed and not args.target:
         ap.error("--changed precisa de um alvo local (repositório git)")
+    if args.logo and not args.html:
+        ap.error("--logo precisa de --html")
 
     semgrep = find_semgrep()
 
@@ -1669,13 +1678,34 @@ def main() -> int:
     # e SCA e de aplicar o baseline. Assim preservam a mesma visão dos achados.
     if findings or configs or args.db_audit or args.url:
         render_console(findings, files_scanned, rules_run, sast=bool(targets))
+    alvo_txt = str(targets[0]) if targets else "(--url)"
+    raiz_rel = (targets[0] if targets and targets[0].is_dir()
+                else (targets[0].parent if targets else Path(".")))
+    reais = [f for f in exigem_atencao(findings) if not f.get("aceito")]
+    nota = res_exec = logo_uri = None
+    if args.executivo or args.html:
+        nota = relatorio.calcular_nota(reais, raiz_rel)
+        res_exec = relatorio.resumo(reais, nota)
+    if args.html and args.logo:
+        try:
+            logo_uri = relatorio.logo_data_uri(Path(args.logo))
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+    if args.executivo:
+        print(f"\nNota de segurança: {nota}/100  ·  exigem atenção: {len(reais)}")
     if args.md:
-        Path(args.md).write_text(
-            render_markdown(findings, str(targets[0]) if targets else "(--url)",
-                            files_scanned, rules_run,
-                            checagens_extras(seg, sca)),
-            encoding="utf-8")
+        md = render_markdown(findings, alvo_txt, files_scanned, rules_run,
+                             checagens_extras(seg, sca))
+        if args.executivo:
+            md += "\n\n" + relatorio.bloco_executivo_md(reais, nota, res_exec, raiz_rel)
+        Path(args.md).write_text(md, encoding="utf-8")
         print(f"\nMarkdown: {args.md}")
+    if args.html:
+        Path(args.html).write_text(
+            relatorio.html_relatorio(reais, res_exec, nota, raiz_rel, alvo_txt, logo_uri),
+            encoding="utf-8")
+        print(f"HTML: {args.html}")
     if args.sarif:
         Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
         print(f"SARIF: {args.sarif}")

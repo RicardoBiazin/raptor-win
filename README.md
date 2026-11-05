@@ -80,6 +80,19 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--sarif FILE` — write a SARIF 2.1.0 report you can upload to **GitHub Code Scanning**
   (`github/codeql-action/upload-sarif`), so findings show up in the repo's Security tab.
 - `--json-out FILE` — write Semgrep's raw JSON.
+- `--executivo` — adds an **executive summary**: a 0–100 security score on the console and at the top of
+  the `--md` report, the 5 main findings, a checklist of indications by OWASP Top 10 (2021) and LGPD,
+  and a **correction prompt** for each finding (in Portuguese, ready to paste into an AI assistant).
+  Without this flag the output is unchanged.
+  - **Score:** starts at 100. Each *problem line* subtracts the weight of its most severe finding
+    (CRITICAL 25, HIGH/ERROR 10, MEDIUM/WARNING 3, INFO/LOW 0.5). Two rules on the same line count once.
+    Rounded down, floor 0. Formula in `relatorio.calcular_nota`.
+  - **Checklist is a set of indications** found by this scan, not a compliance assessment.
+- `--html FILE` — writes a self-contained HTML report with the same content (no external resources).
+- `--logo FILE` — logo for the HTML (PNG, JPG, WEBP or SVG, up to 2 MB, embedded). Needs `--html`.
+  White-label: the HTML shows your logo and a neutral footer, with no raptor-win branding.
+- Secret values are never written into prompts, HTML or the Markdown code excerpt: a line that looks
+  like a credential is left out, and findings from the secrets rules show only the rule and the location.
 - `--changed REF` — scan **only files changed since a git ref** (e.g. `origin/main`). Perfect for
   pull-request / CI gating: fast, and it fails only on *new* problems.
 - `--secrets` — also run **secret scanning**. Two things, and the second is the one
