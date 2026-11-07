@@ -20,6 +20,10 @@ import supply_chain
 import raptor_win as R
 import typosquat
 
+# Cache do CISA KEV isolado: o da máquina (de um scan real) mudaria a severidade
+# dos achados de SCA dublados e faria o resultado depender de quem roda.
+os.environ["RAPTOR_WIN_CACHE"] = tempfile.mkdtemp(prefix="raptor-win-cache-")
+
 
 class FakeResponse:
     def __init__(self, payload):

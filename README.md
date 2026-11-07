@@ -79,6 +79,11 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--md FILE` — write a Markdown report.
 - `--sarif FILE` — write a SARIF 2.1.0 report you can upload to **GitHub Code Scanning**
   (`github/codeql-action/upload-sarif`), so findings show up in the repo's Security tab.
+- **Evidence column:** every finding is `confirmado` (observed on the real target: exact version
+  matched in OSV, `--db-audit` catalog facts, `--url` responses — exposed path content, anon read that
+  returned rows, decoded `service_role` JWT, missing headers) or `indício` (a code pattern to verify:
+  Semgrep, regex secrets, static config lint, typosquat). Shown in the Markdown table, on the console
+  and in SARIF `properties.evidencia`.
 - **Provenance:** the Markdown report has a line, and the SARIF `runs[0].properties.proveniencia`, with
   what the report was made with: raptor-win version (`git describe`), last commit of `rules/raptor` and
   of `rules/raptorwin`, Semgrep version, and the git commit of each target (`-dirty` when it has
@@ -129,6 +134,15 @@ Windows launcher (puts `semgrep` on PATH automatically):
   reports known CVEs per package, with the fixed version and a link. SCA findings join SAST and
   secrets in Markdown, SARIF, accepted-risk baselines and `--fail-on`. Runs standalone too
   (`--sca --no-registry --no-raptor` = SCA only, no Semgrep needed).
+
+  **Which of those CVEs are being exploited.** Each CVE (the OSV id or its `aliases`) is checked
+  against the **CISA KEV** catalog (exploitation confirmed in real attacks) and **EPSS** from FIRST.org
+  (estimated chance of exploitation in the next 30 days). A KEV hit is raised to at least `HIGH`
+  (the original OSV severity is kept as `severidade_osv`), marked `★` on the console and in
+  SARIF `properties.kev`; EPSS is only annotated (`properties.epss`), never changes severity. The KEV
+  catalog is cached for 24 h; offline, a stale cache is used and the report says from when. With no
+  network and no cache the report says the check was **not** done — no marks never means "none
+  exploited". Cache folder: `%LOCALAPPDATA%aptor-win` (override with `RAPTOR_WIN_CACHE`).
 
   pnpm and yarn lockfiles are read **without a YAML parser**. Semgrep is raptor-win's only
   dependency and that is worth keeping: pulling in PyYAML for two parsers is a poor trade, and

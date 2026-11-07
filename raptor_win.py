@@ -34,6 +34,7 @@ import baseline as baseline_mod
 import bundle_scan
 import relatorio
 import db_audit
+import exploracao
 import headers_lint
 import supply_chain
 import secrets_scan
@@ -508,6 +509,8 @@ def render_console(findings: list[dict], files_scanned: int, rules_run: int,
         return
     for f in findings:
         tag = f"  [{f['context']}]" if f["context"] else ""
+        if f.get("evidencia") == "confirmado":
+            tag += "  · confirmado"
         print(f" [{f['severity']:<8}] {short_rule(f['rule'])}")
         print(f"   {f['path']}:{f['line']}{tag}")
         if f["message"]:
@@ -543,7 +546,15 @@ def checagens_extras(secrets: "list[dict] | None", sca: "dict | None") -> list[s
             if vazios:
                 linha += f"; {len(vazios)} arquivo(s) de dependência sem nada extraído"
             linhas.append(linha)
+            explo = exploracao.linha_relatorio(sca.get("exploracao"))
+            if explo:
+                linhas.append(explo)
     return linhas
+
+
+def rotulo_evidencia(f: dict) -> str:
+    """confirmado: observado no alvo real. indício: padrão no código, a conferir."""
+    return "confirmado" if f.get("evidencia") == "confirmado" else "indício"
 
 
 def render_markdown(findings: list[dict], target: str, files_scanned: int, rules_run: int,
@@ -560,15 +571,18 @@ def render_markdown(findings: list[dict], target: str, files_scanned: int, rules
         f"- **Achados:** {len(findings)} (" + (", ".join(f"{s}: {by_sev[s]}" for s in order) or "0") + ")",
         *(extras or []),
         "",
-        "| Sev | Regra | Local | Contexto |",
-        "|-----|-------|-------|----------|",
+        "| Sev | Evidência | Regra | Local | Contexto |",
+        "|-----|-----------|-------|-------|----------|",
     ]
     for f in findings:
         lines.append(
-            f"| {f['severity']} | `{short_rule(f['rule'])}` | `{f['path']}:{f['line']}` | {f['context'] or '-'} |"
+            f"| {f['severity']} | {rotulo_evidencia(f)} | `{short_rule(f['rule'])}` | "
+            f"`{f['path']}:{f['line']}` | {f['context'] or '-'} |"
         )
     lines += [
         "",
+        "> Evidência: **confirmado** = observado no alvo real (versão exata no OSV, catálogo do banco,",
+        "> resposta do site no `--url`); **indício** = padrão no código, a conferir.",
         "> Triagem: findings em `tooling/test` de categorias de taint (SSRF/path-traversal/injeção)",
         "> costumam ser falsos-positivos (acessam recursos próprios, não entrada de terceiros).",
         "> As regras `rules/raptor/` são do projeto RAPTOR (MIT); `rules/raptorwin/` são do próprio raptor-win. Ver `THIRD_PARTY/RAPTOR-LICENSE.txt`.",
@@ -609,6 +623,10 @@ def to_sarif(findings: list[dict], prov: dict | None = None) -> dict:
                 "region": {"startLine": max(1, int(f["line"] or 1))},
             }}],
         }
+        result["properties"] = {"evidencia": f.get("evidencia", "indicio")}
+        for campo in ("kev", "epss"):
+            if f.get(campo) is not None:
+                result["properties"][campo] = f[campo]
         if f.get("aceito"):
             aceite = f["aceito"]
             result["suppressions"] = [{
@@ -1319,7 +1337,11 @@ def run_sca(targets: list[Path]) -> "dict | None":
                 "line": 1,
                 "message": message,
                 "context": f"SCA · {eco}",
+                "osv_id": vid,
+                # Versão exata consultada no OSV: é fato, não padrão de código.
+                "evidencia": "confirmado",
             })
+    estado_exploracao = exploracao.anotar(findings, details)
     # TYPOSQUAT. Roda sobre as mesmas dependencias ja' parseadas, entao nao
     # custa I/O nem uma linha de manifesto a mais. E' o complemento necessario
     # do OSV: pacote malicioso publicado ha' minutos nao tem CVE nenhum, e
@@ -1357,6 +1379,7 @@ def run_sca(targets: list[Path]) -> "dict | None":
     return {"sources": sources, "deps": len(deps), "vulns": hits,
             "gha_revisar": gha_revisar, "gha": len(gha), "vazios": vazios,
             "details": details, "findings": findings, "typosquat": squat,
+            "exploracao": estado_exploracao,
             "pinados": len(pinados), "sem_pin": sorted({n for (_e, n, _v) in sem_pin})}
 
 
@@ -1446,6 +1469,11 @@ def render_sca(sca: dict) -> None:
         print(" Nenhuma dependência vulnerável conhecida. ✅")
         return
     det = sca.get("details", {})
+    estado = sca.get("exploracao") or {}
+    kev_ids = set(estado.get("kev", []))
+    linha_explo = exploracao.linha_relatorio(estado)
+    if linha_explo:
+        print(" " + linha_explo.replace("- **Exploração:**", "exploração:"))
     for (eco, name, ver), ids in sorted(hits.items()):
         print(f"\n {eco}  {name}@{ver} — {len(ids)} vuln(s)")
         for vid in ids:
@@ -1454,6 +1482,8 @@ def render_sca(sca: dict) -> None:
             fixed = _osv_fixed(v) if v else ""
             summ = (v.get("summary") or (v.get("details", "")[:80]) or "").strip().replace("\n", " ")
             print(f"   [{sev:<8}] {vid}  {summ[:90]}")
+            if vid in kev_ids:
+                print("     ★ EXPLORADA EM ATAQUE REAL (CISA KEV): corrija primeiro")
             print(f"     corrigido em: {fixed or '—'}   ·   https://osv.dev/vulnerability/{vid}")
 
 
@@ -1474,6 +1504,9 @@ def run_db_audit(args) -> dict:
             consultar,
             schemas_incluidos=frozenset(args.db_schema) if args.db_schema else None,
             capacidades=cap)
+        # Lido do catálogo do banco no ar: é o estado real, não inferência do código.
+        for a in achados:
+            a.setdefault("evidencia", "confirmado")
         return {"findings": achados, "backend": backend, "capacidades": cap}
     except db_audit.ErroBanco as e:
         return {"findings": [], "backend": args.db_backend, "error": str(e)}

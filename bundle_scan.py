@@ -127,9 +127,20 @@ SONDAS = [
 ]
 
 
+# Achados que a varredura OBSERVOU no site no ar (conteúdo conferido, cabeçalho
+# recebido, leitura anon que devolveu linhas, JWT decodificado): são fato, não
+# padrão. Segredo por regex continua indício: pode ser chave pública por desenho.
+_CONFIRMADOS = ("bundle.exposto-", "bundle.anon-le-tabela", "bundle.sourcemap-expoe-codigo",
+                "bundle.jwt-service-role", "bundle.sem-csp", "bundle.sem-hsts",
+                "bundle.sem-protecao-clickjacking")
+
+
 def _achado(rule: str, sev: str, url: str, msg: str) -> dict:
-    return {"rule": rule, "severity": sev, "context": "", "path": url,
-            "line": 0, "message": msg}
+    a = {"rule": rule, "severity": sev, "context": "", "path": url,
+         "line": 0, "message": msg}
+    if rule.startswith(_CONFIRMADOS):
+        a["evidencia"] = "confirmado"
+    return a
 
 
 def _achados_cabecalhos(url: str, pag: Resp) -> list[dict]:
