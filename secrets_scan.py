@@ -46,7 +46,14 @@ GERADOS_RE = re.compile(
 SEGREDO_NO_NOME_RE = re.compile(
     r"(^|[\\/])(\.env(\..+)?|.*\.pem|.*\.key|.*\.pfx|.*\.p12|"
     r"id_rsa|id_ed25519|.*\.keystore|credentials(\.json)?|"
-    r"service[-_]?account.*\.json)$", re.I)
+    r"service[-_]?account.*\.json|"
+    # Credenciais de ferramenta que NUNCA deveriam ir para o git (lista do shhgit,
+    # MIT): git/netrc/pgpass/pypi/s3cmd/htpasswd, estado do Terraform, login do
+    # Docker, configs de SFTP de editor, cofres e VPN. `.npmrc` fica de fora: o
+    # sem token é versionado de propósito (só o registro); o token cai no regex.
+    r"\.git-credentials|_?\.?netrc|\.pgpass|\.pypirc|\.s3cfg|\.htpasswd|"
+    r".*\.tfvars|.*\.tfstate(\.backup)?|\.dockercfg|\.docker[\\/]config\.json|"
+    r"sftp-config\.json|\.vscode[\\/]sftp\.json|.*\.jks|.*\.kdbx|.*\.ovpn)$", re.I)
 
 # Exemplos e modelos são feitos para ser versionados.
 MODELO_RE = re.compile(r"(\.example$|\.sample$|\.template$|\.dist$)", re.I)
@@ -90,12 +97,39 @@ REGRAS = [
     Regra("supabase-pat", "CRITICAL",
           "Token pessoal do Supabase (acesso à CONTA inteira, não a um projeto)",
           r"\bsbp_[A-Za-z0-9]{36,}"),
-    Regra("openai-key", "CRITICAL", "Chave da OpenAI", r"\bsk-[A-Za-z0-9]{32,}"),
+    # Formatos atuais têm hífen depois do prefixo (sk-proj-, sk-svcacct-, sk-admin-):
+    # o `sk-[A-Za-z0-9]{32,}` antigo parava no hífen e deixava todos passar.
+    Regra("openai-key", "CRITICAL", "Chave da OpenAI",
+          r"\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}|[A-Za-z0-9]{32,})"),
+    Regra("anthropic-key", "CRITICAL", "Chave da Anthropic",
+          r"\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_\-]{40,}"),
     Regra("groq-key", "CRITICAL", "Chave da Groq", r"\bgsk_[A-Za-z0-9]{40,}"),
     Regra("nvidia-key", "CRITICAL", "Chave da NVIDIA", r"\bnvapi-[A-Za-z0-9_\-]{40,}"),
     Regra("slack-token", "CRITICAL", "Token do Slack", r"\bxox[baprs]-[A-Za-z0-9\-]{10,}"),
     Regra("google-api-key", "HIGH", "Chave de API do Google", r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     Regra("stripe-key", "CRITICAL", "Chave secreta do Stripe", r"\b(sk|rk)_live_[A-Za-z0-9]{20,}"),
+    # Prefixos fixos publicados pelos provedores (formatos conferidos nas regras
+    # do gitleaks, MIT). Só os de prefixo: os que dependem de palavra-chave por
+    # perto são ruidosos e ficam com a ATRIBUICAO_RE.
+    Regra("npm-token", "CRITICAL", "Token do npm", r"\bnpm_[A-Za-z0-9]{36}\b"),
+    Regra("pypi-token", "CRITICAL", "Token do PyPI", r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_\-]{50,}"),
+    Regra("gitlab-token", "CRITICAL", "Token do GitLab", r"\bglpat-[A-Za-z0-9_\-]{20,}"),
+    Regra("huggingface-token", "CRITICAL", "Token do Hugging Face", r"\bhf_[A-Za-z]{34,40}\b"),
+    Regra("sendgrid-key", "CRITICAL", "Chave do SendGrid",
+          r"\bSG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}\b"),
+    Regra("digitalocean-token", "CRITICAL", "Token da DigitalOcean",
+          r"\bdo[por]_v1_[a-f0-9]{64}\b"),
+    Regra("shopify-token", "CRITICAL", "Token do Shopify", r"\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b"),
+    Regra("linear-key", "CRITICAL", "Chave da API do Linear", r"\blin_api_[A-Za-z0-9]{40}\b"),
+    Regra("resend-key", "CRITICAL", "Chave do Resend", r"\bre_[A-Za-z0-9]{8}_[A-Za-z0-9]{24}\b"),
+    Regra("slack-webhook", "HIGH", "Webhook do Slack (qualquer um posta no canal)",
+          r"https://hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}"),
+    Regra("teams-webhook", "HIGH", "Webhook do Microsoft Teams (qualquer um posta no canal)",
+          r"https://[a-z0-9]+\.webhook\.office\.com/webhookb2/[a-z0-9\-]+@[a-z0-9\-]+/"
+          r"IncomingWebhook/[a-z0-9]{32}/[a-z0-9\-]{36}"),
+    Regra("google-chat-webhook", "HIGH", "Webhook do Google Chat (qualquer um posta no espaço)",
+          r"https://chat\.googleapis\.com/v1/spaces/[A-Za-z0-9_\-]+/messages\?key=[A-Za-z0-9_\-]{20,}"
+          r"&token=[A-Za-z0-9_\-%]{20,}"),
 
     # Senha DENTRO de string de conexão. O grupo 1 evita reportar a URL
     # inteira no console — o host não é segredo, a senha é.
@@ -116,7 +150,9 @@ REGRAS = [
 # de freio, por isso exige nome sugestivo E valor longo E não-placeholder.
 ATRIBUICAO_RE = re.compile(
     r"""(?ix)
-    \b(
+    # Prefixo com sublinhado (OPENAI_API_KEY, STRIPE_SECRET): `\b` sozinho não
+    # casa antes de `api`, porque `_` é caractere de palavra.
+    \b(?:[A-Za-z0-9]+[_\-])*(
         (?:api|secret|private|auth|access|refresh|session|encryption|signing)
         [_\-]?(?:key|token|secret)
       | password | passwd | senha | client[_\-]?secret

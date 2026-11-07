@@ -21,6 +21,9 @@ import urllib.error
 import urllib.request
 from urllib.parse import urljoin, urlparse
 
+import exploracao
+import headers_lint
+import retire
 from secrets_scan import REGRAS as REGRAS_SEGREDO
 
 UA = "raptor-win-bundle-scan/1.0 (verificacao de site proprio)"
@@ -124,7 +127,31 @@ SONDAS = [
      lambda c: (b"project_id" in c or b"[api]" in c) and not _eh_html(c)),
     ("package.json", "MEDIUM", "manifesto do projeto", _sinal_package),
     (".DS_Store", "LOW", "metadados do macOS", lambda c: c[4:8] == b"Bud1"),
+    (".env.local", "HIGH", "arquivo de ambiente local com valores", _sinal_env),
+    (".env.production", "HIGH", "arquivo de ambiente de produção com valores", _sinal_env),
+    (".git-credentials", "HIGH", "credenciais do git (usuário e token em URL)",
+     lambda c: not _eh_html(c) and b"https://" in c and b"@" in c),
+    (".svn/wc.db", "HIGH", "cópia de trabalho do Subversion",
+     lambda c: c.startswith(b"SQLite format 3\0")),
+    (".npmrc", "HIGH", "configuração do npm com token",
+     lambda c: not _eh_html(c) and b"_authToken" in c),
+    (".vscode/sftp.json", "HIGH", "config de SFTP do editor com host e senha",
+     lambda c: not _eh_html(c) and b'"host"' in c and b'"password"' in c),
+    ("sftp-config.json", "HIGH", "config de SFTP do editor com host e senha",
+     lambda c: not _eh_html(c) and b'"host"' in c and b'"password"' in c),
+    # Servidor de desenvolvimento do Vite exposto como se fosse produção.
+    ("@vite/client", "MEDIUM", "servidor de desenvolvimento do Vite (código-fonte sem build)",
+     lambda c: not _eh_html(c) and b"import.meta.hot" in c),
 ]
+
+# Cabeçalhos que anunciam produto e VERSÃO. Só acusa com número de versão: o
+# nome sozinho ("Netlify", "cloudflare") não ajuda quem procura exploit pronto.
+_CAB_VERSAO = ("server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version",
+               "x-generator")
+_RE_TEM_VERSAO = re.compile(r"\d+\.\d+")
+_RE_META_GERADOR = re.compile(
+    r"""<meta\b[^>]*\bname=["']generator["'][^>]*\bcontent=["']([^"']+)["']"""
+    r"""|<meta\b[^>]*\bcontent=["']([^"']+)["'][^>]*\bname=["']generator["']""", re.I)
 
 
 # Achados que a varredura OBSERVOU no site no ar (conteúdo conferido, cabeçalho
@@ -135,10 +162,10 @@ _CONFIRMADOS = ("bundle.exposto-", "bundle.anon-le-tabela", "bundle.sourcemap-ex
                 "bundle.sem-protecao-clickjacking")
 
 
-def _achado(rule: str, sev: str, url: str, msg: str) -> dict:
+def _achado(rule: str, sev: str, url: str, msg: str, evidencia: bool = False) -> dict:
     a = {"rule": rule, "severity": sev, "context": "", "path": url,
          "line": 0, "message": msg}
-    if rule.startswith(_CONFIRMADOS):
+    if evidencia or rule.startswith(_CONFIRMADOS):
         a["evidencia"] = "confirmado"
     return a
 
@@ -158,6 +185,22 @@ def _achados_cabecalhos(url: str, pag: Resp) -> list[dict]:
         achados.append(_achado("bundle.sem-hsts", "LOW", url,
                                "Sem Strict-Transport-Security: o primeiro acesso pode "
                                "ser feito em HTTP."))
+    # O VALOR de cada cabeçalho recebido, com as mesmas checagens que o
+    # headers_lint faz no netlify.toml/_headers: aqui é o que o site entrega de
+    # fato, não o que o arquivo promete. Clickjacking já foi visto acima.
+    for nome, valor in pag.headers.items():
+        for a in headers_lint._achados_valor(nome, valor, url, 0):
+            if a["rule"] != "headers.csp-sem-frame-ancestors":
+                a["evidencia"] = "confirmado"
+                achados.append(a)
+    for nome in _CAB_VERSAO:
+        valor = pag.headers.get(nome)
+        if valor and _RE_TEM_VERSAO.search(valor):
+            achados.append(_achado(
+                "bundle.versao-exposta", "LOW", url,
+                f"Cabeçalho `{nome}: {valor}` anuncia produto e versão: quem procura "
+                f"exploit pronto para essa versão começa por aqui. Remova ou tire o número.",
+                evidencia=True))
     return achados
 
 
@@ -299,11 +342,26 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
         achados += _achados_cabecalhos(url, pag)
 
         texto_pag = pag.corpo.decode("utf-8", "replace")
+        m_ger = _RE_META_GERADOR.search(texto_pag)
+        gerador = m_ger and (m_ger.group(1) or m_ger.group(2))
+        if gerador and _RE_TEM_VERSAO.search(gerador):
+            achados.append(_achado(
+                "bundle.versao-exposta", "LOW", url,
+                f'`<meta name="generator" content="{gerador}">` anuncia produto e versão '
+                f"(comum em WordPress/Joomla/Drupal). Remova a meta tag.", evidencia=True))
         scripts = []
         for src in _RE_SCRIPT.findall(texto_pag):
             absoluto = urljoin(url, src)
             if absoluto not in scripts:
                 scripts.append(absoluto)
+        for src in scripts:
+            aviso = retire.backdoor(src)
+            if aviso:
+                achados.append(_achado(
+                    "bundle.script-de-host-comprometido", "HIGH", src,
+                    f"A página carrega script de um host sabidamente comprometido "
+                    f"(base Retire.js): {aviso} Troque pela cópia de um CDN confiável ou "
+                    f"sirva o arquivo do próprio site.", evidencia=True))
 
         origem = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
         host = urlparse(url).netloc
@@ -328,6 +386,9 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
 
         refs, tabelas, schemas = set(), set(), set()
         publishable = anon_jwt = None
+        libs_vistas: set[tuple[str, str]] = set()
+        libs_achados: list[dict] = []
+        libs_detalhes: dict[str, dict] = {}
         i = 0
         while i < len(fila):
             src = fila[i]
@@ -344,14 +405,43 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
             schemas |= pistas["schemas"]
             publishable = publishable or pistas["publishable"]
             anon_jwt = anon_jwt or pistas["anon_jwt"]
-            for ref in pistas["sourcemaps"][:1]:
+            # Source map também pode vir pelo cabeçalho, sem comentário no arquivo.
+            cab_mapa = r.headers.get("sourcemap") or r.headers.get("x-sourcemap")
+            for ref in ([cab_mapa] if cab_mapa else []) + pistas["sourcemaps"][:1]:
                 if mapas < MAX_SOURCEMAPS:
                     mapas += 1
                     achados += _achados_sourcemap(src, ref, bus)
             if urlparse(src).netloc == host:
                 for ref in _RE_CHUNK.findall(texto):
                     enfileirar(_url_chunk(ref, src, origem))
+            for lib, versao in retire.detectar(src, texto).items():
+                if (lib, versao) in libs_vistas:
+                    continue
+                libs_vistas.add((lib, versao))
+                vulns = retire.vulnerabilidades(lib, versao)
+                if not vulns:
+                    continue
+                sev, cves, cwes = retire.resumo_vulns(vulns)
+                resumos = "; ".join(dict.fromkeys(
+                    ((v.get("identifiers") or {}).get("summary") or "").strip()
+                    for v in vulns if (v.get("identifiers") or {}).get("summary")))
+                lista = ", ".join(cves[:5]) + (" …" if len(cves) > 5 else "")
+                chave_lib = f"retire:{lib}@{versao}"
+                a = _achado(
+                    "bundle.lib-vulneravel", sev, src,
+                    f"{lib} {versao} servido pelo site tem {len(vulns)} vulnerabilidade(s) "
+                    f"conhecida(s) (base Retire.js)" + (f": {lista}" if cves else "")
+                    + (f". {resumos[:300]}" if resumos else "")
+                    + ". Atualize a biblioteca e publique de novo.", evidencia=True)
+                a["cwe"] = cwes
+                a["osv_id"] = chave_lib
+                libs_detalhes[chave_lib] = {"aliases": cves}
+                libs_achados.append(a)
 
+        if libs_achados:
+            # Mesma marcação do SCA: CVE explorada em ataque real sobe de severidade.
+            exploracao.anotar(libs_achados, libs_detalhes)
+            achados += libs_achados
         if cortados:
             achados.append(_achado(
                 "bundle.limite-de-chunks", "INFO", url,

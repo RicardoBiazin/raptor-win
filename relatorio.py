@@ -210,6 +210,11 @@ def prompt_correcao(f: dict, trecho_codigo: str | None = None) -> str:
 
 
 def categoria_owasp(f: dict) -> str | None:
+    # Dependência com CVE conhecida é A06 pela origem, qualquer que seja o CWE
+    # da falha dentro dela (uma XSS numa lib não é A03 do projeto). Vem antes do
+    # CWE de propósito; e o rule id do OSV (GHSA-/PYSEC-) não tem prefixo.
+    if f.get("osv_id") or str(f.get("context", "")).startswith("SCA"):
+        return "A06"
     for cwe in f.get("cwe") or []:
         if cwe in CWE_OWASP:
             return CWE_OWASP[cwe]

@@ -37,6 +37,8 @@ import db_audit
 import exploracao
 import headers_lint
 import supply_chain
+import binarios
+import supabase_config
 import secrets_scan
 import sql_lint
 import typosquat
@@ -127,6 +129,9 @@ SKIP_DIRS = {
 SEV_RANK = {"CRITICAL": 0, "ERROR": 1, "HIGH": 2, "WARNING": 3,
             "UNKNOWN": 3, "MEDIUM": 4, "INFO": 5, "LOW": 6}
 # Map to SARIF levels (GitHub Code Scanning understands error/warning/note).
+# Faixas do GitHub: critical >= 9.0, high 7.0-8.9, medium 4.0-6.9, low 0.1-3.9.
+SECURITY_SEVERITY = {"CRITICAL": "9.5", "ERROR": "8.0", "HIGH": "8.0", "WARNING": "5.5",
+                     "MEDIUM": "5.5", "UNKNOWN": "5.5", "LOW": "2.0"}
 SARIF_LEVEL = {"CRITICAL": "error", "ERROR": "error", "HIGH": "error",
                "WARNING": "warning", "UNKNOWN": "warning", "MEDIUM": "warning",
                "INFO": "note", "LOW": "note"}
@@ -601,15 +606,29 @@ def to_sarif(findings: list[dict], prov: dict | None = None) -> dict:
         # CWE dele exatamente dali. Sem isto o SARIF do raptor-win e' valido,
         # mas chega do outro lado sem classificacao nenhuma.
         if rid not in rules:
-            regra = {"id": rid, "shortDescription": {"text": short_rule(rid)}}
-            tags = f.get("cwe") or []
-            if tags:
-                regra["properties"] = {"tags": list(tags)}
+            desc = f.get("message") or short_rule(rid)
+            regra = {"id": rid, "name": short_rule(rid),
+                     "shortDescription": {"text": short_rule(rid)},
+                     # O importador SARIF do Faraday le' `fullDescription` sem
+                     # conferir se existe: sem ela da' AttributeError e o
+                     # arquivo INTEIRO e' recusado. `help` vira o campo `data`.
+                     "fullDescription": {"text": desc},
+                     "help": {"text": relatorio.mascarar(desc)}}
+            props = {"tags": [*(f.get("cwe") or []), "security"]}
+            nota = SECURITY_SEVERITY.get(f["severity"])
+            if nota:
+                # GitHub Code Scanning ordena por este numero; o `level` sozinho
+                # poe CRITICAL e HIGH no mesmo balde.
+                props["security-severity"] = nota
+            regra["properties"] = props
             rules[rid] = regra
-        elif f.get("cwe") and "properties" not in rules[rid]:
+        elif f.get("cwe"):
             # O mesmo rule id pode aparecer primeiro num achado sem metadata
             # (um de baseline, por exemplo) e so' depois num com CWE.
-            rules[rid]["properties"] = {"tags": list(f["cwe"])}
+            tags = rules[rid]["properties"]["tags"]
+            for c in f["cwe"]:
+                if c not in tags:
+                    tags.insert(len(tags) - 1, c)
         try:
             uri = os.path.relpath(f["path"]).replace("\\", "/")
         except ValueError:
@@ -1340,6 +1359,9 @@ def run_sca(targets: list[Path]) -> "dict | None":
                 "osv_id": vid,
                 # Versão exata consultada no OSV: é fato, não padrão de código.
                 "evidencia": "confirmado",
+                # GHSA traz o CWE em database_specific; vai para SARIF/Faraday.
+                "cwe": [c for c in ((vuln.get("database_specific") or {}).get("cwe_ids") or [])
+                        if isinstance(c, str) and c.startswith("CWE-")],
             })
     estado_exploracao = exploracao.anotar(findings, details)
     # TYPOSQUAT. Roda sobre as mesmas dependencias ja' parseadas, entao nao
@@ -1664,6 +1686,8 @@ def main() -> int:
     # configuração não é código, então ninguém olhava.
     sqlf = (headers_lint.escanear(targets, SKIP_DIRS)
             + supply_chain.escanear(targets, SKIP_DIRS)
+            + binarios.escanear(targets, SKIP_DIRS)
+            + supabase_config.escanear(targets, SKIP_DIRS)
             + sql_lint.escanear(targets, SKIP_DIRS))
     if sqlf:
         # Mesma classificação de contexto dos achados do Semgrep (fixture/teste/

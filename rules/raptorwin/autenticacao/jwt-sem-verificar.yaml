@@ -1,0 +1,77 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # NAO e' regra do RAPTOR. Ideia da pagina de JWT do PayloadsAllTheThings (MIT):
+  # o payload de um JWT e' so' base64; qualquer um escreve o que quiser nele.
+  # Decodificar "na mao" (split('.')[1] + atob/base64) e usar o resultado NO
+  # SERVIDOR e' confiar num token que ninguem verificou: troca-se `role` ou
+  # `sub` e a funcao acredita.
+  #
+  # A regra do RAPTOR (auth/jwt-no-verify) cobre jwt.decode e jose.decodeJwt;
+  # esta cobre a decodificacao manual. Restrita a codigo de servidor (funcoes,
+  # api, server) porque no navegador decodificar para mostrar o nome do usuario
+  # e' legitimo -- quem decide e' o banco/servidor, nao a tela.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.autenticacao.jwt-decodificado-sem-verificar
+    message: >-
+      Payload de JWT decodificado à mão (split('.')[1] + base64) em código de
+      servidor. Isso NÃO verifica a assinatura: qualquer um monta um token com
+      `role` ou `sub` à escolha. Verifique com a biblioteca (jose.jwtVerify,
+      jwt.verify, PyJWT jwt.decode com a chave) ou, no Supabase, use
+      `supabase.auth.getUser(token)`.
+    languages: [typescript, javascript]
+    severity: ERROR
+    paths:
+      include:
+        - "**/functions/**"
+        - "**/api/**"
+        - "**/server/**"
+        - "**/netlify/**"
+    pattern-either:
+      - pattern: JSON.parse(atob($T.split($D)[1]))
+      - pattern: JSON.parse(atob($T.split($D)[1].$F(...)))
+      - pattern: JSON.parse(atob($T.split($D)[1].$F(...).$G(...)))
+      - pattern: JSON.parse(Buffer.from($T.split($D)[1], ...).toString(...))
+      - pattern: JSON.parse(new TextDecoder().decode($DEC($T.split($D)[1], ...)))
+    metadata:
+      cwe: ["CWE-347: Improper Verification of Cryptographic Signature"]
+      owasp_top_10: ["A07:2021-Identification and Authentication Failures"]
+      tags: ["security", "jwt", "auth"]
+
+  - id: raptorwin.autenticacao.jwt-decodificado-sem-verificar-py
+    message: >-
+      Payload de JWT decodificado à mão (split('.')[1] + base64). Isso NÃO
+      verifica a assinatura: qualquer um monta um token com o conteúdo que
+      quiser. Use PyJWT `jwt.decode(token, chave, algorithms=[...])`.
+    languages: [python]
+    severity: ERROR
+    paths:
+      include:
+        - "**/functions/**"
+        - "**/api/**"
+        - "**/server/**"
+        - "**/views*.py"
+        - "**/routes*.py"
+        - "**/auth*.py"
+    pattern-either:
+      - pattern: json.loads(base64.urlsafe_b64decode($T.split($D)[1] + ...))
+      - pattern: json.loads(base64.urlsafe_b64decode($T.split($D)[1]))
+      - pattern: json.loads(base64.b64decode($T.split($D)[1] + ...))
+    metadata:
+      cwe: ["CWE-347: Improper Verification of Cryptographic Signature"]
+      owasp_top_10: ["A07:2021-Identification and Authentication Failures"]
+      tags: ["security", "jwt", "auth"]
+
+  - id: raptorwin.autenticacao.jwt-ignora-expiracao
+    message: >-
+      `ignoreExpiration: true` aceita token vencido para sempre: um token
+      vazado continua valendo depois do prazo. Tire a opção; se precisa de
+      tolerância de relógio, use `clockTolerance` em segundos.
+    languages: [typescript, javascript]
+    severity: ERROR
+    pattern-either:
+      - pattern: "$JWT.verify($T, $K, {..., ignoreExpiration: true, ...}, ...)"
+      - pattern: "$JWT.verify($T, $K, {..., ignoreExpiration: true, ...})"
+    metadata:
+      cwe: ["CWE-613: Insufficient Session Expiration"]
+      owasp_top_10: ["A07:2021-Identification and Authentication Failures"]
+      tags: ["security", "jwt", "auth"]

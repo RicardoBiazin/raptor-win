@@ -20,6 +20,15 @@ PyPI and npm ecosystems, which are the ones raptor-win parses.
 
 The full text of RAPTOR's licence is included at THIRD_PARTY/RAPTOR-LICENSE.txt.
 
+The files under `data/terceiros/` named `retire-*.json` are the vulnerability and
+backdoored-host databases of Retire.js (https://github.com/RetireJS/retire.js),
+copied unmodified and licensed under the Apache License 2.0. Full text at
+THIRD_PARTY/RETIREJS-LICENSE.txt.
+
+Secret formats in `secrets_scan.py` for npm, PyPI, GitLab, Hugging Face, SendGrid,
+DigitalOcean, Shopify, Linear, Slack and Teams webhooks, OpenAI and Anthropic were
+checked against the gitleaks rules (https://github.com/gitleaks/gitleaks, MIT).
+
 raptor-win is an independent wrapper and is NOT affiliated with or endorsed by the
 RAPTOR project or its authors.
 

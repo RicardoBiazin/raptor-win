@@ -120,6 +120,12 @@ class OwaspTests(unittest.TestCase):
         self.assertEqual(relatorio.categoria_owasp(achado(rule="headers.ausente.csp")), "A05")
         self.assertIsNone(relatorio.categoria_owasp(achado(rule="regra-solta")))
 
+    def test_cve_de_dependencia_e_a06_mesmo_com_cwe(self):
+        """O id do OSV não tem prefixo; uma XSS dentro da lib é A06, não A03."""
+        f = dict(achado(rule="GHSA-2gwj-7jmv-h26r", cwe=["CWE-89"]),
+                 osv_id="GHSA-2gwj-7jmv-h26r", context="SCA · PyPI")
+        self.assertEqual(relatorio.categoria_owasp(f), "A06")
+
     def test_checklist_conta_e_marca_lgpd(self):
         ck = relatorio.checklist([
             achado(cwe=["CWE-89"], rule="a.sqli"),

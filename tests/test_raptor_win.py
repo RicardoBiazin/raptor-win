@@ -2932,8 +2932,24 @@ class TestCweNoSarif(unittest.TestCase):
              "message": "m"},
         ])
         regras = {r["id"]: r for r in sarif["runs"][0]["tool"]["driver"]["rules"]}
-        self.assertEqual(regras["a.b"]["properties"]["tags"], ["CWE-79"])
-        self.assertNotIn("properties", regras["c.d"])
+        self.assertEqual(regras["a.b"]["properties"]["tags"], ["CWE-79", "security"])
+        self.assertEqual(regras["c.d"]["properties"]["tags"], ["security"])
+        self.assertEqual(regras["a.b"]["properties"]["security-severity"], "8.0")
+        self.assertNotIn("security-severity", regras["c.d"]["properties"])  # INFO
+
+    def test_toda_regra_tem_full_description_para_o_faraday(self):
+        """Faraday: `rule.get("fullDescription").get(...)` sem a chave = import recusado."""
+        sarif = raptor_win.to_sarif([
+            {"rule": "a.b", "severity": "CRITICAL", "path": "x.ts", "line": 1, "message": ""},
+            {"rule": "c.d", "severity": "LOW", "path": "y.ts", "line": 2,
+             "message": "fetch para 10.1.2.3"}])
+        for r in sarif["runs"][0]["tool"]["driver"]["rules"]:
+            self.assertTrue(r["fullDescription"]["text"])
+            self.assertTrue(r["help"]["text"])
+        regras = {r["id"]: r for r in sarif["runs"][0]["tool"]["driver"]["rules"]}
+        self.assertEqual(regras["a.b"]["fullDescription"]["text"], "b")
+        self.assertEqual(regras["a.b"]["properties"]["security-severity"], "9.5")
+        self.assertEqual(regras["c.d"]["help"]["text"], "fetch para {ip}")
 
     def test_cwe_chega_mesmo_aparecendo_so_no_segundo_achado(self):
         """O mesmo rule id pode entrar primeiro por um achado sem metadata."""
@@ -2943,7 +2959,7 @@ class TestCweNoSarif(unittest.TestCase):
              "message": "m", "cwe": ["CWE-79"]},
         ])
         regra = sarif["runs"][0]["tool"]["driver"]["rules"][0]
-        self.assertEqual(regra["properties"]["tags"], ["CWE-79"])
+        self.assertEqual(regra["properties"]["tags"], ["CWE-79", "security"])
 
     def test_sarif_leva_a_proveniencia(self):
         """Relatório antigo precisa dizer contra qual conjunto de regras rodou."""

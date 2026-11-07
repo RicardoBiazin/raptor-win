@@ -79,6 +79,12 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--md FILE` — write a Markdown report.
 - `--sarif FILE` — write a SARIF 2.1.0 report you can upload to **GitHub Code Scanning**
   (`github/codeql-action/upload-sarif`), so findings show up in the repo's Security tab.
+- **SARIF for GitHub and Faraday:** every rule carries `fullDescription`, `help` (masked) and
+  `properties.security-severity` (GitHub ranks alerts by it; CRITICAL 9.5, HIGH 8.0, MEDIUM 5.5,
+  LOW 2.0) plus the `security` tag. Faraday's SARIF importer reads `fullDescription` without
+  checking it exists, so before this an import failed outright. Name the file `*.sarif` — Faraday
+  picks the importer by extension. Dependency CVEs carry the CWE from the GitHub advisory and count
+  as OWASP **A06** in `--executivo`.
 - **Evidence column:** every finding is `confirmado` (observed on the real target: exact version
   matched in OSV, `--db-audit` catalog facts, `--url` responses — exposed path content, anon read that
   returned rows, decoded `service_role` JWT, missing headers) or `indício` (a code pattern to verify:
@@ -113,9 +119,12 @@ Windows launcher (puts `semgrep` on PATH automatically):
 
   1. **Credential patterns** in file contents — private keys, AWS/GitHub/Slack/Stripe/Google
      tokens, Supabase `sb_secret_` (project scope) and `sbp_` (personal access token — scoped to
-     the whole **account**: creates and deletes projects, reads secrets), OpenAI `sk-`, Groq
-     `gsk_`, NVIDIA `nvapi-`, JWTs, passwords embedded in connection strings, plus long literals
-     assigned to secret-looking names.
+     the whole **account**: creates and deletes projects, reads secrets), OpenAI (`sk-`,
+     `sk-proj-`, `sk-svcacct-`, `sk-admin-`), Anthropic `sk-ant-`, Groq `gsk_`, NVIDIA `nvapi-`,
+     npm `npm_`, PyPI, GitLab `glpat-`, Hugging Face `hf_`, SendGrid, DigitalOcean, Shopify,
+     Linear, Resend, Slack/Teams/Google Chat webhooks (formats checked against gitleaks, MIT —
+     prefix rules only), JWTs, passwords embedded in connection strings, plus long literals
+     assigned to secret-looking names (also with a prefix: `OPENAI_API_KEY = "…"`).
   2. **Secret-bearing files that git isn't ignoring.** A `.env` outside `.gitignore` hasn't
      leaked *yet* — it leaks on the next `git add -A`, and by then the only real fix is rotating
      the credential. This check asks git directly, so it can't false-positive.
@@ -142,7 +151,8 @@ Windows launcher (puts `semgrep` on PATH automatically):
   SARIF `properties.kev`; EPSS is only annotated (`properties.epss`), never changes severity. The KEV
   catalog is cached for 24 h; offline, a stale cache is used and the report says from when. With no
   network and no cache the report says the check was **not** done — no marks never means "none
-  exploited". Cache folder: `%LOCALAPPDATA%aptor-win` (override with `RAPTOR_WIN_CACHE`).
+  exploited". Cache folder: `%LOCALAPPDATA%
+aptor-win` (override with `RAPTOR_WIN_CACHE`).
 
   pnpm and yarn lockfiles are read **without a YAML parser**. Semgrep is raptor-win's only
   dependency and that is worth keeping: pulling in PyYAML for two parsers is a poor trade, and
@@ -368,6 +378,33 @@ Windows launcher (puts `semgrep` on PATH automatically):
   (no discovery). Without a local target you can run it alone: `raptor_win.py --url https://…`.
   Limits are per page (200 requests, 80 lazy chunks, 40 tables) and a hit on a limit is reported, never
   silent. Chunk names built at runtime (webpack's `"static/js/"+id+".chunk.js"`) are not reached.
+  Also, on what the site actually serves (all `confirmado`):
+  - **header values**, with the same checks `headers_lint` runs on `netlify.toml`/`_headers`
+    (`unsafe-eval`, CSP `*`, short HSTS, `ACAO: *`, …) — the file says what you meant, this says
+    what is live;
+  - **version disclosure**: `Server`/`X-Powered-By`/`X-AspNet-Version`/`X-Generator` and
+    `<meta name="generator">`, only when they carry a version number;
+  - **vulnerable JS libraries** (jQuery, AngularJS, lodash, Bootstrap, DOMPurify, …) detected by
+    URL, file name or banner, with the [Retire.js](https://github.com/RetireJS/retire.js) database
+    (Apache-2.0), CVEs marked with CISA KEV/EPSS like `--sca`. Catches the stale deploy a fixed
+    lockfile doesn't prove, and works on sites with no repo;
+  - **scripts from known-compromised hosts** (polyfill.io, bootcdn, staticfile, …), from the same
+    database, without fetching them;
+  - source maps announced by the `SourceMap`/`X-SourceMap` header, and more content-checked paths:
+    `.env.local`, `.env.production`, `.git-credentials`, `.svn/wc.db`, `.npmrc` with a token, editor
+    SFTP configs, and an exposed Vite dev server (`@vite/client`).
+- **Committed binaries** (always on, needs git): tracked executables identified by **bytes**, not
+  extension — PE, ELF, Mach-O, WebAssembly, `.pyc`, MSI, `.jar`/`.apk`/`.whl` — HIGH when packed
+  (UPX, MPRESS…) or an installer (Inno Setup, NSIS, 7-Zip SFX), MEDIUM otherwise; archives LOW;
+  `gradle-wrapper.jar` INFO. A binary is not reviewable in a diff (OpenSSF Scorecard
+  "Binary-Artifacts"). Files ignored by git are not reported.
+- **Supabase Auth redirect list** (`supabase/config.toml`): `site_url`/`additional_redirect_urls`
+  with `**`, a wildcard over a shared host (`*.netlify.app`, `*.vercel.app`, `*.pages.dev`, …) or
+  `http://` outside localhost. With those, a magic-link/OAuth token can be sent to a site anyone
+  can create. The file is the local config; the report reminds you to check the dashboard list.
+- **JWT rules** (`rules/raptorwin/autenticacao/jwt-sem-verificar.yaml`): payload decoded by hand
+  (`JSON.parse(atob(t.split(".")[1]))`, Python `urlsafe_b64decode`) in server code, and
+  `jwt.verify(..., { ignoreExpiration: true })`.
 - `--fail-on {CRITICAL,ERROR,HIGH,WARNING,MEDIUM,INFO,LOW}` — non-zero exit if a real finding at/above
   that severity exists.
 
@@ -397,6 +434,12 @@ weekly, with Windows Task Scheduler:
 schtasks /create /tn "raptor-win weekly" /sc weekly /d MON /st 09:00 /f `
   /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\DEV\raptor-win\scan-all.ps1 -Base C:\DEV"
 ```
+
+### Weekly refresh of rules and data
+
+The RAPTOR rules in `rules/raptor/` and the Retire.js data in `data/terceiros/` are third-party
+and change often. The maintainer refreshes them weekly (mirror, full test suite, patch release);
+a release is only published when the tests pass.
 
 ## Triage built in
 
