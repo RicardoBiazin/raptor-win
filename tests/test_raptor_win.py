@@ -2490,6 +2490,65 @@ class TestBundleScan(unittest.TestCase):
             achados = bundle_scan.escanear_urls([self.PAG], buscar_fn=falso)
         self.assertIn("bundle.limite-de-requisicoes", self._regras(achados))
 
+    def test_chunk_de_import_dinamico_e_lido(self):
+        """Vite: o código da rota fica num chunk que só o import() referencia."""
+        base = "https://site.exemplo.com.br/assets/"
+        entrada = ('const r=()=>__vitePreload(()=>import("./Admin-ab12.js"),'
+                   '["assets/Admin-ab12.js","assets/Admin-ab12.css"]);')
+        chunk = f'const k = "{_jwt("service_role")}";'
+        achados = self._varrer({base + "index.js": (200, {}, entrada),
+                                base + "Admin-ab12.js": (200, {}, chunk)})
+        self.assertIn("bundle.jwt-service-role", self._regras(achados))
+
+    def test_modulepreload_do_html_e_lido(self):
+        html = ('<script type="module" src="/assets/index.js"></script>'
+                '<link rel="modulepreload" crossorigin href="/assets/vendor-9f.js">')
+        chunk = f'const k = "{_jwt("service_role")}";'
+        achados = self._varrer({"https://site.exemplo.com.br/assets/vendor-9f.js":
+                                (200, {}, chunk)}, pagina_html=html)
+        self.assertIn("bundle.jwt-service-role", self._regras(achados))
+
+    def test_chunk_de_outro_dominio_nao_e_buscado(self):
+        """Só o código do próprio site: um import de CDN não vira requisição."""
+        import bundle_scan
+        pedidos = []
+
+        def falso(url, headers=None):
+            pedidos.append(url)
+            if url == self.PAG:
+                return bundle_scan.Resp(200, dict(self.CSP_OK),
+                                        b'<script src="/assets/index.js"></script>', url)
+            if url.endswith("/assets/index.js"):
+                return bundle_scan.Resp(200, {}, b'import("https://cdn.outro.com/x/lib.js");'
+                                                 b'import("/x/chart.js")', url)
+            return bundle_scan.Resp(404, {}, b"", url)
+
+        bundle_scan.escanear_urls([self.PAG], buscar_fn=falso)
+        self.assertNotIn("https://cdn.outro.com/x/lib.js", pedidos)
+        self.assertIn("https://site.exemplo.com.br/x/chart.js", pedidos)
+
+    def test_nome_de_pacote_nao_vira_chunk(self):
+        import bundle_scan
+        self.assertEqual(bundle_scan._RE_CHUNK.findall('require("chart.js"); x="highlight.js"'), [])
+
+    def test_index_html_no_lugar_do_chunk_e_ignorado(self):
+        """SPA responde 200 com o index.html para chunk inexistente."""
+        html = '<!doctype html><html><script type="module" src="/assets/index.js"></script>'
+        achados = self._varrer({"https://site.exemplo.com.br/assets/index.js":
+                                (200, {}, html + f'"{_jwt("service_role")}"')}, pagina_html=html)
+        self.assertNotIn("bundle.jwt-service-role", self._regras(achados))
+
+    def test_teto_de_chunks_e_avisado(self):
+        import bundle_scan
+        from unittest import mock
+        entrada = "".join(f'import("./c{i}.js");' for i in range(5))
+        with mock.patch.object(bundle_scan, "MAX_CHUNKS", 2):
+            achados = self._varrer({"https://site.exemplo.com.br/assets/index.js":
+                                    (200, {}, entrada)})
+        aviso = [a for a in achados if a["rule"] == "bundle.limite-de-chunks"]
+        self.assertEqual(len(aviso), 1)
+        self.assertIn("3 NÃO", aviso[0]["message"])
+
     def test_corte_de_tabelas_e_avisado(self):
         """Mais tabelas que o teto: as que ficaram de fora precisam ser ditas."""
         import bundle_scan
@@ -2881,6 +2940,33 @@ class TestCweNoSarif(unittest.TestCase):
         ])
         regra = sarif["runs"][0]["tool"]["driver"]["rules"][0]
         self.assertEqual(regra["properties"]["tags"], ["CWE-79"])
+
+    def test_sarif_leva_a_proveniencia(self):
+        """Relatório antigo precisa dizer contra qual conjunto de regras rodou."""
+        prov = {"raptor_win": "v9.9.9", "regras_raptor": "abc1234", "regras_raptorwin": "def5678",
+                "semgrep": "1.182.1", "alvos": [{"alvo": "C:/x/app", "commit": "0123abc"}]}
+        run = raptor_win.to_sarif([], prov)["runs"][0]
+        self.assertEqual(run["tool"]["driver"]["version"], "v9.9.9")
+        self.assertEqual(run["properties"]["proveniencia"]["regras_raptor"], "abc1234")
+        self.assertNotIn("properties", raptor_win.to_sarif([])["runs"][0])
+
+    def test_proveniencia_sem_git_fica_none(self):
+        """Pasta sem `.git`: valor ausente, nunca inventado."""
+        with tempfile.TemporaryDirectory() as d:
+            prov = raptor_win.proveniencia(None, [Path(d)])
+        self.assertIsNone(prov["semgrep"])
+        self.assertIsNone(prov["alvos"][0]["commit"])
+        linha = raptor_win.linha_proveniencia(prov)
+        self.assertIn("Semgrep ?", linha)
+        self.assertIn("@?", linha)
+
+    def test_proveniencia_do_proprio_repo(self):
+        aqui = Path(raptor_win.__file__).resolve().parent
+        if not (aqui / ".git").exists():
+            self.skipTest("cópia sem .git")
+        prov = raptor_win.proveniencia(None, [aqui])
+        self.assertTrue(prov["regras_raptor"])
+        self.assertTrue(prov["alvos"][0]["commit"])
 
 
 # ---------------------------------------------------------------------------

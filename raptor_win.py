@@ -298,6 +298,50 @@ def versao_semgrep(semgrep: str, env: dict | None = None) -> "tuple[int, ...] | 
     return _VERSAO_SEMGREP[semgrep]
 
 
+def _git(pasta: Path, *args: str) -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(pasta), *args], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+def proveniencia(semgrep: str | None, alvos: list[Path]) -> dict:
+    """Com que ferramenta, regras e código o relatório foi feito.
+
+    As regras do RAPTOR mudam toda semana; sem isto, um relatório antigo não
+    diz contra qual conjunto de regras foi gerado, e "sumiu o achado" não
+    separa correção de regra que mudou. Cópia sem `.git` (zip da release)
+    fica com None, nunca com valor inventado.
+    """
+    aqui = Path(__file__).resolve().parent
+    v = _VERSAO_SEMGREP.get(semgrep) if semgrep else None
+    prov = {
+        "raptor_win": _git(aqui, "describe", "--tags", "--always", "--dirty"),
+        "regras_raptor": _git(aqui, "log", "-1", "--format=%h", "--", "rules/raptor"),
+        "regras_raptorwin": _git(aqui, "log", "-1", "--format=%h", "--", "rules/raptorwin"),
+        "semgrep": ".".join(map(str, v)) if v else None,
+        "alvos": [],
+    }
+    for a in alvos:
+        pasta = a if a.is_dir() else a.parent
+        head = _git(pasta, "rev-parse", "--short", "HEAD")
+        if head and _git(pasta, "status", "--porcelain", "--untracked-files=no"):
+            head += "-dirty"
+        prov["alvos"].append({"alvo": str(a), "commit": head})
+    return prov
+
+
+def linha_proveniencia(prov: dict) -> str:
+    def x(v):
+        return v or "?"
+    alvos = ", ".join(f"{Path(a['alvo']).name}@{x(a['commit'])}" for a in prov["alvos"])
+    return (f"- **Proveniência:** raptor-win {x(prov['raptor_win'])} · regras RAPTOR "
+            f"{x(prov['regras_raptor'])} · regras raptor-win {x(prov['regras_raptorwin'])} · "
+            f"Semgrep {x(prov['semgrep'])}" + (f" · alvo {alvos}" if alvos else ""))
+
+
 def montar_cmd_semgrep(semgrep: str, configs: list[str], targets: list[Path],
                        excludes: list[str], versao: "tuple[int, ...] | None") -> list[str]:
     cmd = [semgrep, "--json", "--metrics=off", "--quiet", "--disable-version-check"]
@@ -532,7 +576,7 @@ def render_markdown(findings: list[dict], target: str, files_scanned: int, rules
     return "\n".join(lines)
 
 
-def to_sarif(findings: list[dict]) -> dict:
+def to_sarif(findings: list[dict], prov: dict | None = None) -> dict:
     """SARIF 2.1.0 mínimo e válido — pronto para o GitHub Code Scanning."""
     rules: dict[str, dict] = {}
     results = []
@@ -572,17 +616,20 @@ def to_sarif(findings: list[dict]) -> dict:
                 "justification": aceite.get("motivo", "Risco aceito no baseline"),
             }]
         results.append(result)
+    driver = {
+        "name": "raptor-win",
+        "informationUri": "https://github.com/RicardoBiazin/raptor-win",
+        "rules": list(rules.values()),
+    }
+    run = {"tool": {"driver": driver}, "results": results}
+    if prov:
+        if prov.get("raptor_win"):
+            driver["version"] = prov["raptor_win"]
+        run["properties"] = {"proveniencia": prov}
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": "raptor-win",
-                "informationUri": "https://github.com/RicardoBiazin/raptor-win",
-                "rules": list(rules.values()),
-            }},
-            "results": results,
-        }],
+        "runs": [run],
     }
 
 
@@ -1682,6 +1729,7 @@ def main() -> int:
     raiz_rel = (targets[0] if targets and targets[0].is_dir()
                 else (targets[0].parent if targets else Path(".")))
     reais = [f for f in exigem_atencao(findings) if not f.get("aceito")]
+    prov = proveniencia(semgrep if configs else None, targets)
     nota = res_exec = logo_uri = None
     if args.executivo or args.html:
         nota = relatorio.calcular_nota(reais, raiz_rel)
@@ -1696,7 +1744,7 @@ def main() -> int:
         print(f"\nNota de segurança: {nota}/100  ·  exigem atenção: {len(reais)}")
     if args.md:
         md = render_markdown(findings, alvo_txt, files_scanned, rules_run,
-                             checagens_extras(seg, sca))
+                             [linha_proveniencia(prov)] + checagens_extras(seg, sca))
         if args.executivo:
             md += "\n\n" + relatorio.bloco_executivo_md(reais, nota, res_exec, raiz_rel)
         Path(args.md).write_text(md, encoding="utf-8")
@@ -1707,7 +1755,7 @@ def main() -> int:
             encoding="utf-8")
         print(f"HTML: {args.html}")
     if args.sarif:
-        Path(args.sarif).write_text(json.dumps(to_sarif(findings), indent=2), encoding="utf-8")
+        Path(args.sarif).write_text(json.dumps(to_sarif(findings, prov), indent=2), encoding="utf-8")
         print(f"SARIF: {args.sarif}")
 
     if args.sugerir_baseline:

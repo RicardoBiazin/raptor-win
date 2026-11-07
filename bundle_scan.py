@@ -27,10 +27,23 @@ UA = "raptor-win-bundle-scan/1.0 (verificacao de site proprio)"
 TIMEOUT = 20
 MAX_BYTES = 8 * 1024 * 1024
 MAX_SCRIPTS = 15
+# Chunks carregados sob demanda (rota de SPA Vite/Rollup): a maior parte do
+# código de tela mora neles, não no <script> do HTML.
+MAX_CHUNKS = 80
+MAX_SOURCEMAPS = 15
 MAX_REQS = 200
 MAX_TABELAS = 40
 
 _RE_SCRIPT = re.compile(r"""<script[^>]*\bsrc=["']([^"']+)["']""", re.IGNORECASE)
+_RE_LINK = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+_RE_HREF = re.compile(r"""\bhref=["']([^"']+)["']""", re.IGNORECASE)
+_RE_MODULEPRELOAD = re.compile(r"""\brel=["']?[^"'>]*\bmodulepreload\b""", re.IGNORECASE)
+# Caminho literal de chunk JS dentro de um bundle: `import("./Tela-ab12.js")` e a
+# lista de dependências do `__vitePreload` (`"assets/Tela-ab12.js"`). Exige `./`,
+# `../` ou uma barra, para não confundir com nome de pacote ("chart.js"). Nome
+# montado em runtime (webpack: "static/js/"+id+".chunk.js") não é alcançado.
+_RE_CHUNK = re.compile(
+    r"""["'`]((?:\.{1,2}/)[\w\-./@~]+\.m?js|/?[\w\-.@~]+/[\w\-./@~]*\.m?js)["'`]""")
 _RE_SUPA_REF = re.compile(r"https://([a-z0-9]{20})\.supabase\.co")
 _RE_PUBLISHABLE = re.compile(r"\bsb_publishable_[A-Za-z0-9_\-]{20,}")
 _RE_JWT = re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
@@ -175,6 +188,19 @@ def _achados_texto(url: str, texto: str) -> tuple[list[dict], dict]:
     return achados, pistas
 
 
+def _url_chunk(ref: str, url_script: str, origem: str) -> str:
+    """`./x.js` é relativo ao módulo que importa; `assets/x.js` (deps do
+    __vitePreload) é relativo à base do site."""
+    if ref.startswith(("./", "../")):
+        return urljoin(url_script, ref)
+    return origem + (ref if ref.startswith("/") else "/" + ref)
+
+
+def _preloads(html: str, url: str) -> list[str]:
+    return [urljoin(url, m.group(1)) for tag in _RE_LINK.findall(html)
+            if _RE_MODULEPRELOAD.search(tag) and (m := _RE_HREF.search(tag))]
+
+
 def _achados_sourcemap(url_script: str, ref: str, bus) -> list[dict]:
     url_map = urljoin(url_script, ref)
     r = bus(url_map)
@@ -268,11 +294,36 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
             if absoluto not in scripts:
                 scripts.append(absoluto)
 
+        origem = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+        host = urlparse(url).netloc
+        fila = scripts[:MAX_SCRIPTS]
+        vistos = set(scripts)
+        extras = cortados = mapas = 0
+
+        def enfileirar(c: str) -> None:
+            nonlocal extras, cortados
+            # Só chunks do próprio site: CDN de terceiro não é o código do alvo.
+            if urlparse(c).netloc != host or c in vistos:
+                return
+            vistos.add(c)
+            if extras < MAX_CHUNKS:
+                fila.append(c)
+                extras += 1
+            else:
+                cortados += 1
+
+        for c in _preloads(texto_pag, url):
+            enfileirar(c)
+
         refs, tabelas, schemas = set(), set(), set()
         publishable = anon_jwt = None
-        for src in scripts[:MAX_SCRIPTS]:
+        i = 0
+        while i < len(fila):
+            src = fila[i]
+            i += 1
             r = bus(src)
-            if not r or r.status != 200:
+            # SPA devolve o index.html com 200 para chunk inexistente: não é JS.
+            if not r or r.status != 200 or _eh_html(r.corpo):
                 continue
             texto = r.corpo.decode("utf-8", "replace")
             ach, pistas = _achados_texto(src, texto)
@@ -283,9 +334,19 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
             publishable = publishable or pistas["publishable"]
             anon_jwt = anon_jwt or pistas["anon_jwt"]
             for ref in pistas["sourcemaps"][:1]:
-                achados += _achados_sourcemap(src, ref, bus)
+                if mapas < MAX_SOURCEMAPS:
+                    mapas += 1
+                    achados += _achados_sourcemap(src, ref, bus)
+            if urlparse(src).netloc == host:
+                for ref in _RE_CHUNK.findall(texto):
+                    enfileirar(_url_chunk(ref, src, origem))
 
-        origem = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+        if cortados:
+            achados.append(_achado(
+                "bundle.limite-de-chunks", "INFO", url,
+                f"O site carrega mais de {MAX_CHUNKS} chunks JS sob demanda; "
+                f"{cortados} NÃO foram lidos (segredos e tabelas neles ficam de fora)."))
+
         for caminho, sev, desc, sinal in SONDAS:
             r = bus(f"{origem}/{caminho}")
             if r and r.status == 200 and sinal(r.corpo):

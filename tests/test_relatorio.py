@@ -93,6 +93,21 @@ class PromptTests(unittest.TestCase):
         self.assertIn("subprocess.call(x, shell=True)", texto)
         self.assertIn("Acrescente um teste", texto)
 
+    def test_identificadores_viram_marcador(self):
+        """O prompt vai para um assistente de terceiro: e-mail, IP e projeto
+        Supabase saem como marcador, e o resto da linha continua útil."""
+        f = achado("ERROR", "app.ts", 3, "ssrf", "fetch para 10.0.0.12")
+        linha = ('fetch("https://abcdefghijklmnopqrst.supabase.co/x?to=ana.souza@empresa.com.br'
+                 '&ip=192.168.10.1&local=127.0.0.1")')
+        texto = relatorio.prompt_correcao(f, trecho_codigo=linha)
+        for vazado in ("abcdefghijklmnopqrst", "ana.souza@empresa.com.br", "192.168.10.1", "10.0.0.12"):
+            self.assertNotIn(vazado, texto)
+        self.assertIn("https://{projeto}.supabase.co/x?to={email}&ip={ip}&local=127.0.0.1", texto)
+        self.assertIn("fetch para {ip}", texto)
+
+    def test_versao_nao_vira_ip(self):
+        self.assertEqual(relatorio.mascarar("semgrep==1.182.1 e lib 2.0"), "semgrep==1.182.1 e lib 2.0")
+
 
 class OwaspTests(unittest.TestCase):
     def test_cwe_tem_prioridade(self):

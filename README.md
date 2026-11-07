@@ -79,6 +79,11 @@ Windows launcher (puts `semgrep` on PATH automatically):
 - `--md FILE` — write a Markdown report.
 - `--sarif FILE` — write a SARIF 2.1.0 report you can upload to **GitHub Code Scanning**
   (`github/codeql-action/upload-sarif`), so findings show up in the repo's Security tab.
+- **Provenance:** the Markdown report has a line, and the SARIF `runs[0].properties.proveniencia`, with
+  what the report was made with: raptor-win version (`git describe`), last commit of `rules/raptor` and
+  of `rules/raptorwin`, Semgrep version, and the git commit of each target (`-dirty` when it has
+  uncommitted changes). The RAPTOR rules change weekly; this tells whether a finding disappeared because
+  the code was fixed or because the rule changed. A copy without `.git` shows `?`, never a guess.
 - `--json-out FILE` — write Semgrep's raw JSON.
 - `--executivo` — adds an **executive summary**: a 0–100 security score on the console and at the top of
   the `--md` report, the 5 main findings, a checklist of indications by OWASP Top 10 (2021) and LGPD,
@@ -93,6 +98,9 @@ Windows launcher (puts `semgrep` on PATH automatically):
   White-label: the HTML shows your logo and a neutral footer, with no raptor-win branding.
 - Secret values are never written into prompts, HTML or the Markdown code excerpt: a line that looks
   like a credential is left out, and findings from the secrets rules show only the rule and the location.
+  Correction prompts also mask identifiers that are not secrets but should not leave the machine:
+  e-mails become `{email}`, IPv4 addresses `{ip}` (except `127.0.0.1`/`0.0.0.0`), and the Supabase
+  project ref `{projeto}`; the rest of the line stays, so the prompt is still useful.
 - `--changed REF` — scan **only files changed since a git ref** (e.g. `origin/main`). Perfect for
   pull-request / CI gating: fast, and it fails only on *new* problems.
 - `--secrets` — also run **secret scanning**. Two things, and the second is the one
@@ -332,7 +340,9 @@ Windows launcher (puts `semgrep` on PATH automatically):
   once is a rubber stamp, and then the baseline stops meaning "someone looked".
 
 - `--url URL [URL ...]` — **read-only check of a site you publish**, from the point of view of a visitor.
-  It downloads the page and the scripts it references, looks for secrets in them (same patterns as
+  It downloads the page and the scripts it references — plus the JS chunks a bundler loads on demand
+  (`<link rel="modulepreload">`, `import("./Route-ab12.js")`, the `__vitePreload` dependency list),
+  same origin only, because in a code-split SPA most of the screen code lives there —, looks for secrets in them (same patterns as
   `--secrets`), decodes any JWT to read its `role` (only `service_role` is flagged; the public `anon`
   key is expected), follows a `sourceMappingURL` and flags it when it carries `sourcesContent`, and
   probes a few sensitive paths (`.env`, `.git/config`, `source.zip`, …). A SPA answers `200` with the
@@ -342,7 +352,8 @@ Windows launcher (puts `semgrep` on PATH automatically):
   (`db: { schema: … }`), and reports only the row count and column names — never the values.
   Only `GET` requests. Use it on your own sites: it makes real requests, and the target is explicit
   (no discovery). Without a local target you can run it alone: `raptor_win.py --url https://…`.
-  Limits are per page (200 requests, 40 tables) and a hit on a limit is reported, never silent.
+  Limits are per page (200 requests, 80 lazy chunks, 40 tables) and a hit on a limit is reported, never
+  silent. Chunk names built at runtime (webpack's `"static/js/"+id+".chunk.js"`) are not reached.
 - `--fail-on {CRITICAL,ERROR,HIGH,WARNING,MEDIUM,INFO,LOW}` — non-zero exit if a real finding at/above
   that severity exists.
 

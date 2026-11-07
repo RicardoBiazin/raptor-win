@@ -90,6 +90,22 @@ def _tem_valor_sensivel(texto: str) -> bool:
     return bool(ATRIBUICAO_RE.search(texto) or _RE_ATRIB_SOLTA.search(texto))
 
 
+# Identificadores trocados por marcador no prompt de correção (que vai para um
+# assistente de terceiro): a linha continua útil para corrigir, mas o e-mail, o
+# IP e o projeto Supabase de quem roda o scan não saem da máquina.
+_MASCARAS = [
+    (re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b"), "{email}"),
+    (re.compile(r"\b(?!127\.0\.0\.1\b)(?!0\.0\.0\.0\b)(?:\d{1,3}\.){3}\d{1,3}\b"), "{ip}"),
+    (re.compile(r"\b[a-z0-9]{20}(?=\.supabase\.(?:co|in)\b)"), "{projeto}"),
+]
+
+
+def mascarar(texto: str) -> str:
+    for rx, marcador in _MASCARAS:
+        texto = rx.sub(marcador, texto)
+    return texto
+
+
 def _curta(rule: str) -> str:
     return rule.split(".")[-1] if "." in rule else rule
 
@@ -173,7 +189,7 @@ def trecho(raiz: Path, path: str, line: int) -> str | None:
 
 def prompt_correcao(f: dict, trecho_codigo: str | None = None) -> str:
     """Texto para colar num assistente de código. Sem valor sensível, nunca."""
-    local = f"{f['path']}:{f['line']}" if f.get("line") else f.get("path", "")
+    local = mascarar(f"{f['path']}:{f['line']}" if f.get("line") else f.get("path", ""))
     cwe = ", ".join(f.get("cwe") or []) or "não informado"
     linhas = [f"Corrija o achado `{_curta(f['rule'])}` em `{local}` "
               f"(severidade {f.get('severity', '?')}; CWE: {cwe}).", ""]
@@ -185,9 +201,9 @@ def prompt_correcao(f: dict, trecho_codigo: str | None = None) -> str:
         ]
         return "\n".join(linhas)
     if f.get("message"):
-        linhas += ["Descrição da regra:", f["message"], ""]
+        linhas += ["Descrição da regra:", mascarar(f["message"]), ""]
     if trecho_codigo:
-        linhas += ["Linha afetada:", "```", trecho_codigo, "```", ""]
+        linhas += ["Linha afetada:", "```", mascarar(trecho_codigo), "```", ""]
     linhas += ["Corrija a causa, sem mudar o comportamento esperado do código.",
                "Acrescente um teste que falha antes da correção e passa depois."]
     return "\n".join(linhas)
