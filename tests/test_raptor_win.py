@@ -618,6 +618,11 @@ class DbFormatoDoAchadoTests(unittest.TestCase):
         a = db_audit._achados_funcoes([_fn(anon_exec=True)])
         self.assertEqual(len(raptor_win.exigem_atencao(a)), len(a))
 
+    def test_achado_sem_context_nao_derruba_exigem_atencao(self):
+        """Achado de credencial sem `context` quebrava o fim do scan (KeyError) com baseline."""
+        a = [{"rule": "secrets.x", "severity": "CRITICAL", "path": "a", "line": 1, "message": "m"}]
+        self.assertEqual(len(raptor_win.exigem_atencao(a)), 1)
+
     def test_sobrecargas_sao_achados_distintos(self):
         p1 = db_audit._pseudo("public", "f", "uuid")
         p2 = db_audit._pseudo("public", "f", "uuid, text")

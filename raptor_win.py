@@ -430,7 +430,7 @@ def exigem_atencao(findings: list[dict]) -> list[dict]:
     falha plantada não, e o rótulo agora diz o que faz.
     """
     return [f for f in findings
-            if not any(marca in f["context"] for marca in DISPENSA_ATENCAO)]
+            if not any(marca in f.get("context", "") for marca in DISPENSA_ATENCAO)]
 
 
 _CWE_RE = re.compile(r"CWE-\d+")
@@ -513,7 +513,7 @@ def render_console(findings: list[dict], files_scanned: int, rules_run: int,
             print(" Nenhum achado. ✅")
         return
     for f in findings:
-        tag = f"  [{f['context']}]" if f["context"] else ""
+        tag = f"  [{f['context']}]" if f.get("context") else ""
         if f.get("evidencia") == "confirmado":
             tag += "  · confirmado"
         print(f" [{f['severity']:<8}] {short_rule(f['rule'])}")

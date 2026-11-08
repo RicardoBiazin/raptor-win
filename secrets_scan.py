@@ -329,6 +329,7 @@ def _achados_prefixo_publico(texto: str, rel: str) -> list[dict]:
             "severity": "CRITICAL",
             "path": rel,
             "line": _linha_de(texto, m.start()),
+            "context": "",
             "message": (
                 f"`{nome}` usa prefixo que o bundler PUBLICA, e o nome anuncia "
                 f"um segredo. Vite e Next decidem pelo prefixo o que entra no "
@@ -384,6 +385,7 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
                     "severity": "INFO" if env_sem_segredo else "HIGH",
                     "path": rel_norm,
                     "line": 0,
+                    "context": "",
                     "message": (
                         "Arquivo de ambiente versionado. Hoje não há credencial "
                         "nele, então não houve vazamento — mas se um segredo for "
