@@ -36,15 +36,20 @@ rules:
     pattern-sinks:
       - patterns:
           - pattern-either:
-              - pattern: $DB.Query($Q + $X, ...)
-              - pattern: $DB.QueryRow($Q + $X, ...)
-              - pattern: $DB.Exec($Q + $X, ...)
-              - pattern: $DB.QueryContext($CTX2, $Q + $X, ...)
-              - pattern: $DB.QueryRowContext($CTX2, $Q + $X, ...)
-              - pattern: $DB.ExecContext($CTX2, $Q + $X, ...)
-          - metavariable-regex:
-              metavariable: $Q
-              regex: '(?i).*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|MERGE|WHERE|FROM|INTO|SET|VALUES|JOIN|UNION|GRANT|REVOKE).*'
+              - pattern: $DB.Query($QUERY, ...)
+              - pattern: $DB.QueryRow($QUERY, ...)
+              - pattern: $DB.Exec($QUERY, ...)
+              - pattern: $DB.QueryContext($CTX2, $QUERY, ...)
+              - pattern: $DB.QueryRowContext($CTX2, $QUERY, ...)
+              - pattern: $DB.ExecContext($CTX2, $QUERY, ...)
+          - metavariable-pattern:
+              metavariable: $QUERY
+              patterns:
+                - pattern: $PREFIX + $SUFFIX
+                - metavariable-regex:
+                    metavariable: $PREFIX
+                    regex: '(?i).*\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|MERGE|WHERE|FROM|INTO|SET|VALUES|JOIN|UNION|GRANT|REVOKE)\b.*'
+          - focus-metavariable: $QUERY
     metadata:
       cwe: ["CWE-89"]
       owasp_top_10: ["A3:2021-Injection"]
@@ -93,15 +98,14 @@ rules:
         from: $V
         to: $M
     pattern-sinks:
-      - pattern-either:
-          # Statement — always string-based, no parameterisation
-          - pattern: (Statement $STMT).executeQuery($Q)
-          - pattern: (Statement $STMT).executeUpdate($Q)
-          - pattern: (Statement $STMT).execute($Q)
-          # String concat into query (catches format patterns)
-          - pattern: (Statement $STMT).executeQuery($Q + $X)
-          - pattern: (Statement $STMT).executeUpdate($Q + $X)
-          - pattern: (Statement $STMT).execute($Q + $X)
+      # Statement overloads carry SQL first; later arguments select generated
+      # keys or columns, not additional SQL text.
+      - patterns:
+          - pattern-either:
+              - pattern: (Statement $STMT).executeQuery($Q)
+              - pattern: (Statement $STMT).executeUpdate($Q, ...)
+              - pattern: (Statement $STMT).execute($Q, ...)
+          - focus-metavariable: $Q
       # Tainted SQL text handed to prepare — a constant '?' query is
       # the safe form and carries no taint; concatenated SQL prepared
       # then executed is injectable despite the PreparedStatement type.
@@ -160,7 +164,19 @@ rules:
     languages: [javascript, typescript]
     severity: CRITICAL
     mode: taint
+    # Closed option records need exact fields and direct call matching.
+    options:
+      implicit_ellipsis: false
+      go_deeper_expr: false
     pattern-sources:
+      # Whole query objects can supply SQL option fields through spreads.
+      # Exact matching keeps the request receiver itself untainted.
+      - patterns:
+          - pattern: $REQ.query
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: '(?i)^(req|request)$'
+        exact: true
       - pattern-either:
           # Express — receiver-name anchored: bare $REQ.query/.params/
           # .body/.headers sources match those field names on any local
@@ -174,6 +190,9 @@ rules:
                   - pattern: $REQ.body[...]
                   - pattern: $REQ.body.$PROP
                   - pattern: $REQ.headers[...]
+                  - pattern: $REQ.headers.$PROP
+                  - pattern: $REQ.get($FIELD)
+                  - pattern: $REQ.header($FIELD)
               - metavariable-regex:
                   metavariable: $REQ
                   regex: '(?i)^(req|request)$'
@@ -183,9 +202,22 @@ rules:
               - pattern-either:
                   - pattern: $CTX.query[...]
                   - pattern: $CTX.query.$PROP
+                  - pattern: $CTX.request.query[...]
+                  - pattern: $CTX.request.query.$PROP
                   - pattern: $CTX.params[...]
                   - pattern: $CTX.params.$PROP
                   - pattern: $CTX.request.body[...]
+                  - pattern: $CTX.request.body.$PROP
+                  - pattern: $CTX.get($FIELD)
+                  - pattern: $CTX.request.get($FIELD)
+                  - pattern: $CTX.header[...]
+                  - pattern: $CTX.header.$PROP
+                  - pattern: $CTX.headers[...]
+                  - pattern: $CTX.headers.$PROP
+                  - pattern: $CTX.request.header[...]
+                  - pattern: $CTX.request.header.$PROP
+                  - pattern: $CTX.request.headers[...]
+                  - pattern: $CTX.request.headers.$PROP
               - metavariable-regex:
                   metavariable: $CTX
                   regex: '(?i)^(c|ctx|context)$'
@@ -207,17 +239,28 @@ rules:
       - patterns:
           - pattern: $DB.prepare($Q)
           - focus-metavariable: $Q
-      # String concat in query position — SQL keyword in $Q prevents
-      # FPs on non-SQL .query() calls (cache, search, etc.)
+      # Focus the complete SQL expression, including taint in earlier concat
+      # operands, while keeping bound values outside the sink.
       - patterns:
           - pattern-either:
-              - pattern: $CONN.query($Q + $X, ...)
-              - pattern: $POOL.query($Q + $X, ...)
-              - pattern: $CLIENT.query($Q + $X, ...)
-              - pattern: $DB.exec($Q + $X)
-          - metavariable-regex:
-              metavariable: $Q
-              regex: '(?i).*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|MERGE|WHERE|FROM|INTO|SET|VALUES|JOIN|UNION|GRANT|REVOKE).*'
+              - patterns:
+                  - pattern: $CONN.query($QUERY, ...)
+                  - pattern-not: '$CONN.query({text: "...", values: $_}, ...)'
+              - patterns:
+                  - pattern: $CONN.query($QUERY, ...)
+                  - pattern: '$CONN.query({..., ...$REST, ...}, ...)'
+              - patterns:
+                  - pattern: $CONN.query($QUERY, ...)
+                  - pattern: '$CONN.query({..., [$KEY]: $VALUE, ...}, ...)'
+              - pattern: $DB.exec($QUERY)
+          - metavariable-pattern:
+              metavariable: $QUERY
+              patterns:
+                - pattern: $PREFIX + $SUFFIX
+                - metavariable-regex:
+                    metavariable: $PREFIX
+                    regex: '(?i).*\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|MERGE|WHERE|FROM|INTO|SET|VALUES|JOIN|UNION|GRANT|REVOKE)\b.*'
+          - focus-metavariable: $QUERY
       # Template-literal query construction in query position. The $Q
       # regex requires a quoted/backtick literal opening with SQL text,
       # so identifier names containing SQL words never match; taint can
@@ -237,7 +280,18 @@ rules:
       # name is the FP control — only DB-shaped receivers qualify.
       - patterns:
           - pattern-either:
-              - pattern: $DBOBJ.query($Q, ...)
+              # Only a closed constant-text/values object is known bind data.
+              - patterns:
+                  - pattern: $DBOBJ.query($Q, ...)
+                  - pattern-not: '$DBOBJ.query({text: "...", values: $_}, ...)'
+              # Unknown overrides retain the generic sink even when the
+              # record matcher can see two otherwise admissible fields.
+              - patterns:
+                  - pattern: $DBOBJ.query($Q, ...)
+                  - pattern: '$DBOBJ.query({..., ...$REST, ...}, ...)'
+              - patterns:
+                  - pattern: $DBOBJ.query($Q, ...)
+                  - pattern: '$DBOBJ.query({..., [$KEY]: $VALUE, ...}, ...)'
               - pattern: $DBOBJ.execute($Q, ...)
           - metavariable-regex:
               metavariable: $DBOBJ

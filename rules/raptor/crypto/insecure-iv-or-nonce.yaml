@@ -17,43 +17,100 @@ rules:
   # cryptography.hazmat AEAD classes: inline `AESGCM(k).encrypt(b"...", ...)`
   # and the two-step variable-instance shape `a = AESGCM(k)` ... `a.encrypt(b"...", ...)`.
   - id: raptor.crypto.nonce.literal.python
-    message: Nonce is a constant literal. Use os.urandom() or library defaults. Verify randomness.
+    message: >-
+      Candidate: encryption is passed a literal nonce. Review nonce uniqueness
+      for each key and the actual encryption calls. These APIs require an
+      explicit nonce; a literal alone does not establish reuse.
     languages: [python]
     severity: HIGH
     patterns:
-      - pattern-either:
-          - pattern: $AEAD($K).encrypt($NONCE, ...)
-          - pattern: |
-              $A = $AEAD($K)
-              ...
-              $A.encrypt($NONCE, ...)
-      - metavariable-regex:
-          metavariable: $AEAD
-          regex: "^(AESGCM|ChaCha20Poly1305|AESCCM|AESOCB3)$"
-      - metavariable-pattern:
-          metavariable: $NONCE
-          patterns:
-            - pattern-either:
-                - pattern: b"..."
-                - pattern: b"..." * $N
+    - pattern-either:
+      - pattern: $CTOR.encrypt($NONCE, ...)
+      - patterns:
+        - pattern: '$A = $CTOR
+
+            ...
+
+            $A.encrypt($NONCE, ...)
+
+            '
+        - pattern-not: '$A = $CTOR
+
+            ...
+
+            $A = ...
+
+            ...
+
+            $A.encrypt($NONCE, ...)
+
+            '
+      - pattern: $CTOR.encrypt(..., nonce=$NONCE, ...)
+      - patterns:
+        - pattern: '$A = $CTOR
+
+            ...
+
+            $A.encrypt(..., nonce=$NONCE, ...)
+
+            '
+        - pattern-not: '$A = $CTOR
+
+            ...
+
+            $A = ...
+
+            ...
+
+            $A.encrypt(..., nonce=$NONCE, ...)
+
+            '
+    - metavariable-pattern:
+        metavariable: $CTOR
+        pattern-either:
+        - pattern: cryptography.hazmat.primitives.ciphers.aead.AESGCM($K)
+        - pattern: cryptography.hazmat.primitives.ciphers.aead.AESGCM(key=$K)
+        - pattern: cryptography.hazmat.primitives.ciphers.aead.ChaCha20Poly1305($K)
+        - pattern: cryptography.hazmat.primitives.ciphers.aead.ChaCha20Poly1305(key=$K)
+        - pattern: cryptography.hazmat.primitives.ciphers.aead.AESCCM($K, ...)
+        - pattern: cryptography.hazmat.primitives.ciphers.aead.AESCCM(key=$K, ...)
+        - pattern: cryptography.hazmat.primitives.ciphers.aead.AESOCB3($K)
+        - pattern: cryptography.hazmat.primitives.ciphers.aead.AESOCB3(key=$K)
+    - metavariable-pattern:
+        metavariable: $NONCE
+        patterns:
+        - pattern-either:
+          - pattern: b"..."
+          - pattern: b"..." * $N
     metadata:
       cwe: ["CWE-330"]
       asvs: ["V7.3"]
 
   # pycryptodome: literal nonce / IV passed to AES.new
   - id: raptor.crypto.iv.literal.pycryptodome.python
-    message: IV or nonce is a constant literal. Use get_random_bytes() or let the library generate it. Verify randomness.
+    message: >-
+      Candidate: an AES constructor receives a literal IV or nonce. Review
+      mode-specific unpredictability or uniqueness requirements, the key,
+      and encryption/decryption context. A literal alone does not prove misuse.
     languages: [python]
     severity: HIGH
     patterns:
       - pattern-either:
-          - pattern: AES.new($K, AES.MODE_GCM, ..., nonce=$IV, ...)
-          - pattern: AES.new($K, AES.MODE_CCM, ..., nonce=$IV, ...)
-          - pattern: AES.new($K, AES.MODE_CTR, ..., nonce=$IV, ...)
-          - pattern: AES.new($K, AES.MODE_CBC, $IV, ...)
-          - pattern: AES.new($K, AES.MODE_CFB, $IV, ...)
-          - pattern: AES.new($K, AES.MODE_OFB, $IV, ...)
-          - pattern: AES.new($K, $MODE, ..., iv=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, Crypto.Cipher.AES.MODE_GCM, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, mode=Crypto.Cipher.AES.MODE_GCM, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new(key=$K, mode=Crypto.Cipher.AES.MODE_GCM, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, Crypto.Cipher.AES.MODE_CCM, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, mode=Crypto.Cipher.AES.MODE_CCM, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new(key=$K, mode=Crypto.Cipher.AES.MODE_CCM, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, Crypto.Cipher.AES.MODE_CTR, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, mode=Crypto.Cipher.AES.MODE_CTR, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new(key=$K, mode=Crypto.Cipher.AES.MODE_CTR, ..., nonce=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, Crypto.Cipher.AES.MODE_CBC, $IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, Crypto.Cipher.AES.MODE_CFB, $IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, Crypto.Cipher.AES.MODE_OFB, $IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, $MODE, ..., iv=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new($K, mode=$MODE, ..., iv=$IV, ...)
+          - pattern: Crypto.Cipher.AES.new(key=$K, mode=$MODE, ..., iv=$IV, ...)
       - metavariable-pattern:
           metavariable: $IV
           patterns:
@@ -66,14 +123,35 @@ rules:
 
   # cryptography.hazmat block modes: literal IV / nonce in the mode constructor
   - id: raptor.crypto.iv.literal.hazmat-modes.python
-    message: IV or nonce is a constant literal. Use os.urandom() for the mode IV/nonce. Verify randomness.
+    message: >-
+      Candidate: a cryptography mode receives a literal IV, nonce, or tweak.
+      Review the mode's unpredictability or uniqueness requirements and the
+      key/data-unit context. XTS tweaks may be deterministic data-unit
+      identifiers; a literal alone does not prove misuse.
     languages: [python]
     severity: HIGH
     patterns:
-      - pattern: modes.$MODE($IV, ...)
-      - metavariable-regex:
-          metavariable: $MODE
-          regex: "^(CBC|GCM|CTR|CFB|CFB8|OFB|XTS)$"
+      - pattern-either:
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.CBC($IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.CBC(initialization_vector=$IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.GCM($IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.GCM(initialization_vector=$IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.CTR($IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.CTR(nonce=$IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.CFB($IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.CFB(initialization_vector=$IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.CFB8($IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.CFB8(initialization_vector=$IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.OFB($IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.OFB(initialization_vector=$IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.XTS($IV, ...)
+          - pattern: cryptography.hazmat.primitives.ciphers.modes.XTS(tweak=$IV, ...)
+          - pattern: cryptography.hazmat.decrepit.ciphers.modes.CFB($IV, ...)
+          - pattern: cryptography.hazmat.decrepit.ciphers.modes.CFB(initialization_vector=$IV, ...)
+          - pattern: cryptography.hazmat.decrepit.ciphers.modes.CFB8($IV, ...)
+          - pattern: cryptography.hazmat.decrepit.ciphers.modes.CFB8(initialization_vector=$IV, ...)
+          - pattern: cryptography.hazmat.decrepit.ciphers.modes.OFB($IV, ...)
+          - pattern: cryptography.hazmat.decrepit.ciphers.modes.OFB(initialization_vector=$IV, ...)
       - metavariable-pattern:
           metavariable: $IV
           patterns:

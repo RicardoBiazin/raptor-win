@@ -12,6 +12,26 @@ rules:
     severity: CRITICAL
     mode: taint
     pattern-sources:
+      # Koa query and route maps are complete filter values too.
+      - patterns:
+          - pattern-either:
+              - pattern: $CTX.query
+              - pattern: $CTX.request.query
+              - pattern: $CTX.params
+          - metavariable-regex:
+              metavariable: $CTX
+              regex: '(?i)^(c|ctx|context)$'
+        exact: true
+      # Query and route maps can be passed directly as filter objects.
+      # Exact sources keep the request receiver outside the tainted value.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.query
+              - pattern: $REQ.params
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: '(?i)^(req|request)$'
+        exact: true
       - pattern-either:
           # Express — receiver-name anchored: bare $REQ.query/.params/
           # .body/.headers sources match those field names on any local
@@ -26,6 +46,9 @@ rules:
                   - pattern: $REQ.body.$PROP
                   - pattern: $REQ.body
                   - pattern: $REQ.headers[...]
+                  - pattern: $REQ.headers.$PROP
+                  - pattern: $REQ.get($FIELD)
+                  - pattern: $REQ.header($FIELD)
               - metavariable-regex:
                   metavariable: $REQ
                   regex: '(?i)^(req|request)$'
@@ -35,9 +58,22 @@ rules:
               - pattern-either:
                   - pattern: $CTX.query[...]
                   - pattern: $CTX.query.$PROP
+                  - pattern: $CTX.request.query[...]
+                  - pattern: $CTX.request.query.$PROP
                   - pattern: $CTX.params[...]
                   - pattern: $CTX.params.$PROP
                   - pattern: $CTX.request.body[...]
+                  - pattern: $CTX.request.body.$PROP
+                  - pattern: $CTX.get($FIELD)
+                  - pattern: $CTX.request.get($FIELD)
+                  - pattern: $CTX.header[...]
+                  - pattern: $CTX.header.$PROP
+                  - pattern: $CTX.headers[...]
+                  - pattern: $CTX.headers.$PROP
+                  - pattern: $CTX.request.header[...]
+                  - pattern: $CTX.request.header.$PROP
+                  - pattern: $CTX.request.headers[...]
+                  - pattern: $CTX.request.headers.$PROP
                   - pattern: $CTX.request.body
               - metavariable-regex:
                   metavariable: $CTX

@@ -51,21 +51,53 @@ rules:
     pattern-sources:
       - pattern-either:
           - pattern: request.GET[$_]
+          - pattern: request.GET.get(...)
+          - pattern: request.GET.getlist(...)
           - pattern: request.POST[$_]
+          - pattern: request.POST.get(...)
+          - pattern: request.POST.getlist(...)
           - pattern: flask.request.args[$_]
+          - pattern: flask.request.args.get($KEY)
+          - pattern: flask.request.args.get($KEY, $DEFAULT)
+          - pattern: flask.request.args.get($KEY, default=$DEFAULT)
+          - pattern: flask.request.args.get(key=$KEY)
+          - pattern: flask.request.args.get(key=$KEY, default=$DEFAULT)
+          # Converted MultiDict lists need callback analysis; model only
+          # unconverted single-key calls here.
+          - pattern: flask.request.args.getlist($KEY)
+          - pattern: flask.request.args.getlist(key=$KEY)
           - pattern: flask.request.form[$_]
+          - pattern: flask.request.form.get($KEY)
+          - pattern: flask.request.form.get($KEY, $DEFAULT)
+          - pattern: flask.request.form.get($KEY, default=$DEFAULT)
+          - pattern: flask.request.form.get(key=$KEY)
+          - pattern: flask.request.form.get(key=$KEY, default=$DEFAULT)
+          - pattern: flask.request.form.getlist($KEY)
+          - pattern: flask.request.form.getlist(key=$KEY)
+          - pattern: flask.request.values[$_]
+          - pattern: flask.request.values.get($KEY)
+          - pattern: flask.request.values.get($KEY, $DEFAULT)
+          - pattern: flask.request.values.get($KEY, default=$DEFAULT)
+          - pattern: flask.request.values.get(key=$KEY)
+          - pattern: flask.request.values.get(key=$KEY, default=$DEFAULT)
+          - pattern: flask.request.values.getlist($KEY)
+          - pattern: flask.request.values.getlist(key=$KEY)
           - pattern: input(...)
           - pattern: os.environ[$_]
+          - pattern: os.environ.get(...)
     pattern-sinks:
-      - pattern-either:
-          - pattern: $DB.execute($QUERY)
-          - pattern: $DB.executemany($QUERY)
-    # NOTE: sqlalchemy.text() and psycopg2.sql.SQL() are NOT
-    # sanitizers — both wrap the string verbatim, so tainted data
-    # concatenated into their argument still reaches the database
-    # as executable SQL. Genuinely parameterised calls
-    # (db.execute(query, params)) are already non-findings: the
-    # one-argument sink patterns above do not match them.
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.execute($QUERY, ...)
+              - pattern: $DB.executemany($QUERY, ...)
+              - pattern: $DB.executescript($QUERY)
+              - pattern: $DB.execute(query=$QUERY, ...)
+              - pattern: $DB.executemany(query=$QUERY, ...)
+              - pattern: $DB.execute(statement=$QUERY, ...)
+          - focus-metavariable: $QUERY
+    # Wrapping text with sqlalchemy.text() or psycopg2.sql.SQL() does not
+    # escape it. Bound values are separate from SQL text: adding bind
+    # arguments cannot make an already tainted statement safe.
     pattern-sanitizers:
       - pattern: int(...)
         exact: true

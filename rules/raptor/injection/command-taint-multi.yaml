@@ -37,16 +37,17 @@ rules:
           - pattern: os.Getenv(...)
           - pattern: os.Args[...]
     pattern-sinks:
-      - pattern-either:
-          # Shell invocation — the dangerous pattern
-          - pattern: exec.Command("sh", "-c", $CMD)
-          - pattern: exec.Command("bash", "-c", $CMD)
-          - pattern: exec.Command("/bin/sh", "-c", $CMD)
-          - pattern: exec.Command("/bin/bash", "-c", $CMD)
-          - pattern: exec.CommandContext($CTX2, "sh", "-c", $CMD)
-          - pattern: exec.CommandContext($CTX2, "bash", "-c", $CMD)
-          - pattern: exec.CommandContext($CTX2, "/bin/sh", "-c", $CMD)
-          - pattern: exec.CommandContext($CTX2, "/bin/bash", "-c", $CMD)
+      - patterns:
+          - pattern-either:
+              - pattern: exec.Command("sh", "-c", $CMD, ...)
+              - pattern: exec.Command("bash", "-c", $CMD, ...)
+              - pattern: exec.Command("/bin/sh", "-c", $CMD, ...)
+              - pattern: exec.Command("/bin/bash", "-c", $CMD, ...)
+              - pattern: exec.CommandContext($CTX2, "sh", "-c", $CMD, ...)
+              - pattern: exec.CommandContext($CTX2, "bash", "-c", $CMD, ...)
+              - pattern: exec.CommandContext($CTX2, "/bin/sh", "-c", $CMD, ...)
+              - pattern: exec.CommandContext($CTX2, "/bin/bash", "-c", $CMD, ...)
+          - focus-metavariable: $CMD
       # Tainted binary name — attacker controls which program runs.
       # focus-metavariable restricts taint to $CMD only, preventing FPs
       # when a constant binary receives tainted arguments (e.g.
@@ -161,6 +162,9 @@ rules:
                   - pattern: $REQ.body[...]
                   - pattern: $REQ.body.$PROP
                   - pattern: $REQ.headers[...]
+                  - pattern: $REQ.headers.$PROP
+                  - pattern: $REQ.get($FIELD)
+                  - pattern: $REQ.header($FIELD)
               - metavariable-regex:
                   metavariable: $REQ
                   regex: '(?i)^(req|request)$'
@@ -170,9 +174,22 @@ rules:
               - pattern-either:
                   - pattern: $CTX.query[...]
                   - pattern: $CTX.query.$PROP
+                  - pattern: $CTX.request.query[...]
+                  - pattern: $CTX.request.query.$PROP
                   - pattern: $CTX.params[...]
                   - pattern: $CTX.params.$PROP
                   - pattern: $CTX.request.body[...]
+                  - pattern: $CTX.request.body.$PROP
+                  - pattern: $CTX.get($FIELD)
+                  - pattern: $CTX.request.get($FIELD)
+                  - pattern: $CTX.header[...]
+                  - pattern: $CTX.header.$PROP
+                  - pattern: $CTX.headers[...]
+                  - pattern: $CTX.headers.$PROP
+                  - pattern: $CTX.request.header[...]
+                  - pattern: $CTX.request.header.$PROP
+                  - pattern: $CTX.request.headers[...]
+                  - pattern: $CTX.request.headers.$PROP
               - metavariable-regex:
                   metavariable: $CTX
                   regex: '(?i)^(c|ctx|context)$'
