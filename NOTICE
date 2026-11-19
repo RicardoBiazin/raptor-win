@@ -29,6 +29,11 @@ Secret formats in `secrets_scan.py` for npm, PyPI, GitLab, Hugging Face, SendGri
 DigitalOcean, Shopify, Linear, Slack and Teams webhooks, OpenAI and Anthropic were
 checked against the gitleaks rules (https://github.com/gitleaks/gitleaks, MIT).
 
+Several checks were inspired by ideas (no code copied) from open projects: Firebase
+and npx-confusion checks from usestrix/strix (Apache-2.0); the "not covered by this
+scan" section and the per-finding verification goals from humaidhahm/opencode-pentester
+and benavlabs/vibe-check (MIT).
+
 raptor-win is an independent wrapper and is NOT affiliated with or endorsed by the
 RAPTOR project or its authors.
 

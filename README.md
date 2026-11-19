@@ -85,6 +85,13 @@ Windows launcher (puts `semgrep` on PATH automatically):
   checking it exists, so before this an import failed outright. Name the file `*.sarif` — Faraday
   picks the importer by extension. Dependency CVEs carry the CWE from the GitHub advisory and count
   as OWASP **A06** in `--executivo`.
+- **Executive report that says what it cannot see.** With `--executivo`/`--html`, OWASP rows a static
+  scan cannot reach (A01 object-level access, A04 rate limiting, A07 login on every route/CSRF, A09
+  logging) read `0 (não prova ausência)` instead of a bare `0`, followed by a short "Teste à mão" table
+  with PASS/FAIL steps (an unauthenticated replay → 401; user A asks for B's ID → 403; the public key alone
+  reads a table → `[]`). Each **correction prompt** now ends with a *verification goal* for its rule
+  family — something you can check from outside, like `curl -sI` showing the headers, or an anon request
+  returning `[]` — instead of only "add a test".
 - **Evidence column:** every finding is `confirmado` (observed on the real target: exact version
   matched in OSV, `--db-audit` catalog facts, `--url` responses — exposed path content, anon read that
   returned rows, decoded `service_role` JWT, missing headers) or `indício` (a code pattern to verify:
@@ -392,12 +399,39 @@ aptor-win` (override with `RAPTOR_WIN_CACHE`).
     database, without fetching them;
   - source maps announced by the `SourceMap`/`X-SourceMap` header, and more content-checked paths:
     `.env.local`, `.env.production`, `.git-credentials`, `.svn/wc.db`, `.npmrc` with a token, editor
-    SFTP configs, and an exposed Vite dev server (`@vite/client`).
+    SFTP configs, and an exposed Vite dev server (`@vite/client`);
+  - **database dumps and backups left on the site**: `backup.sql`, `dump.sql`, `database.sql`
+    (by content: a `pg_dump`/`mysqldump` header, or `CREATE TABLE` + `INSERT INTO`), `.env.bak`,
+    `.env.old`, `.env.save` and `.htpasswd` (a hash line);
+  - **Firebase Realtime Database open to anyone**: when the bundle carries a `databaseURL`
+    (`*.firebaseio.com`, `*.firebasedatabase.app`), one `GET <db>/.json?shallow=true` — which returns
+    only the names of the top-level nodes, never values — and the count is reported. `401` (the good
+    answer) and an empty database are not findings;
+  - **cookie attributes** (`Secure`, `HttpOnly`, `SameSite`) on the page's own `Set-Cookie`; the
+    `sb-*-auth-token` cookies of `@supabase/ssr` are exempt from `HttpOnly` (it is by design);
+  - **server-side state** (`__NEXT_DATA__`, `window.__NUXT__`): secret patterns inside it, and fields
+    like `password_hash`, `token` or `cpf` that the server serialized to every visitor.
 - **Committed binaries** (always on, needs git): tracked executables identified by **bytes**, not
   extension — PE, ELF, Mach-O, WebAssembly, `.pyc`, MSI, `.jar`/`.apk`/`.whl` — HIGH when packed
   (UPX, MPRESS…) or an installer (Inno Setup, NSIS, 7-Zip SFX), MEDIUM otherwise; archives LOW;
   `gradle-wrapper.jar` INFO. A binary is not reviewable in a diff (OpenSSF Scorecard
   "Binary-Artifacts"). Files ignored by git are not reported.
+- **Database dumps in git** (same scan): a tracked `pg_dump`/`mysqldump` file **with data** (`COPY …
+  FROM stdin`, `INSERT INTO`) or a `pg_dump -Fc` binary is HIGH and counts as an LGPD indication.
+  A schema-only dump (a migration baseline) and `seed.sql` are not reported.
+- **MCP servers / agent tools committed to the repo** (`.mcp.json`, `.cursor/mcp.json`,
+  `.vscode/mcp.json`, `claude_desktop_config.json`, `.gemini/settings.json`): `npx -y pkg`,
+  `bunx`, `uvx`, `pipx run`, `pnpm dlx` with no pinned version or `@latest` (every time someone opens the
+  project the editor downloads and **runs** the newest publication with the developer's access), `http://`
+  URLs outside localhost, and the package name goes through the typosquat check.
+- **Firebase rules** (`rules/raptorwin/firebase/`): `firestore.rules`/`storage.rules` with
+  `allow write: if true`, "test mode" (`request.time < timestamp.date(...)`), `allow read: if true`
+  and `match /{document=**}` open to any logged-in user; `database.rules.json` with `".read": true`.
+- **Stripe webhook without signature check** (`rules/raptorwin/pagamento/`): a file that handles
+  `checkout.session.completed` / `payment_intent.succeeded` / `invoice.paid` and never calls
+  `constructEvent`/`constructEventAsync`/`construct_event` (or a manual HMAC compare). Anyone can POST a fake
+  "payment approved". The Semgrep Registry has no rule for it (checked). If the check lives in a middleware,
+  accept it in the baseline.
 - **Supabase Auth redirect list** (`supabase/config.toml`): `site_url`/`additional_redirect_urls`
   with `**`, a wildcard over a shared host (`*.netlify.app`, `*.vercel.app`, `*.pages.dev`, …) or
   `http://` outside localhost. With those, a magic-link/OAuth token can be sent to a site anyone

@@ -1,0 +1,50 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # NAO e' regra do RAPTOR. Checado no Registry do Semgrep em 19/11/2026: nenhum
+  # pack (javascript, typescript, python, nodejsscan, security-audit) tem regra de
+  # assinatura de webhook do Stripe.
+  #
+  # O endpoint de webhook e' publico por natureza: o Stripe nao tem como se
+  # autenticar de outro jeito que nao a assinatura (`Stripe-Signature`). Sem
+  # conferi-la, qualquer pessoa faz um POST com `checkout.session.completed` e o
+  # sistema libera o pedido, a assinatura ou o credito sem pagamento nenhum.
+  # Ideia da categoria de pagamentos do AI-CHECKLIST do opencode-pentester (MIT).
+  #
+  # Generico e por ARQUIVO (a verificacao fica numa linha e o uso do evento em
+  # outra): acusa o arquivo que trata um evento de cobranca e NAO contem
+  # `constructEvent`/`constructEventAsync`/`construct_event`, nem comparacao de
+  # HMAC feita a mao (`timingSafeEqual`, `compare_digest`, `createHmac`).
+  # Limite: se a verificacao esta' num OUTRO arquivo (um middleware), da' falso
+  # positivo; o achado mostra onde conferir. O local reportado e' o inicio do
+  # arquivo.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.pagamento.stripe-webhook-sem-assinatura
+    message: >-
+      Este arquivo trata eventos de cobrança do Stripe (`checkout.session.completed`,
+      `payment_intent.succeeded`, `invoice.paid`...) mas não confere a assinatura
+      (`stripe.webhooks.constructEvent` / `constructEventAsync` / Python
+      `construct_event`). O endpoint de webhook é público: qualquer pessoa pode
+      enviar um POST falso de "pagamento aprovado" e liberar pedido, plano ou
+      crédito sem pagar. Leia o corpo CRU (`await req.text()`), valide o header
+      `Stripe-Signature` com o segredo do webhook e só então use o evento. Se a
+      verificação está em outro arquivo (middleware), aceite no baseline.
+    languages: [generic]
+    severity: ERROR
+    paths:
+      include:
+        - "**/*.ts"
+        - "**/*.js"
+        - "**/*.mjs"
+        - "**/*.py"
+      exclude:
+        - "**/*.test.*"
+        - "**/*.spec.*"
+        - "**/test_*.py"
+    pattern-regex: '(?is)\A(?!.*(?:construct_?event|timingSafeEqual|compare_digest|createHmac|hmac\.new)).*?(?:checkout\.session\.completed|payment_intent\.succeeded|invoice\.payment_succeeded|invoice\.paid|customer\.subscription\.created)'
+    metadata:
+      cwe: ["CWE-345: Insufficient Verification of Data Authenticity"]
+      owasp_top_10: ["A08:2021-Software and Data Integrity Failures"]
+      references:
+        - https://docs.stripe.com/webhooks#verify-events
+      tags: ["security", "stripe", "webhook", "payment", "signature"]
+      confidence: MEDIUM

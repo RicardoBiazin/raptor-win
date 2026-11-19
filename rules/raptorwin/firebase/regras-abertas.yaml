@@ -1,0 +1,123 @@
+rules:
+  # ---------------------------------------------------------------------------
+  # NAO e' regra do RAPTOR. Firebase (Firestore, Storage e Realtime Database) tem
+  # o mesmo erro do RLS do Supabase: a "regra de seguranca" que o console gera em
+  # modo de teste libera tudo para qualquer pessoa com a chave publica do app.
+  # Ideia da skill de Firebase do strix (Apache-2.0); as regras abaixo sao
+  # proprias.
+  #
+  # Modo generico (a linguagem das rules do Firebase nao tem parser no Semgrep):
+  # casa o texto dos arquivos `firestore.rules`, `storage.rules` e
+  # `database.rules.json`. Indicio, nao prova: confira no console qual regra esta'
+  # PUBLICADA, que pode diferir do arquivo versionado.
+  # ---------------------------------------------------------------------------
+  - id: raptorwin.firebase.escrita-aberta
+    message: >-
+      Regra do Firebase libera ESCRITA para qualquer pessoa (`allow write: if true`
+      ou equivalente). Quem tem a chave publica do app, que fica no JavaScript do
+      site, apaga ou altera todos os documentos/arquivos. Exija `request.auth != null`
+      e confira o dono do documento (`request.auth.uid == resource.data.uid`).
+    languages: [generic]
+    severity: ERROR
+    paths:
+      include:
+        - "firestore.rules"
+        - "storage.rules"
+        - "*.firestore.rules"
+        - "*.storage.rules"
+    pattern-regex: 'allow\s+[a-z,\s]*\b(write|create|update|delete)\b[a-z,\s]*:\s*if\s+true\s*;'
+    metadata:
+      cwe: ["CWE-862: Missing Authorization"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      references:
+        - https://firebase.google.com/docs/rules/insecure-rules
+      tags: ["security", "firebase", "firestore", "access-control"]
+      confidence: HIGH
+
+  - id: raptorwin.firebase.leitura-aberta
+    message: >-
+      Regra do Firebase libera LEITURA para qualquer pessoa (`allow read: if true`).
+      So' e' aceitavel para conteudo publico por desenho (cardapio, catalogo); se a
+      colecao guarda dado de usuario, pedido ou contato, todo mundo le tudo. Confirme
+      que nada sensivel esta' nesse caminho.
+    languages: [generic]
+    severity: WARNING
+    paths:
+      include:
+        - "firestore.rules"
+        - "storage.rules"
+        - "*.firestore.rules"
+        - "*.storage.rules"
+    pattern-regex: 'allow\s+(?:read|get|list)(?:\s*,\s*(?:read|get|list))*\s*:\s*if\s+true\s*;'
+    metadata:
+      cwe: ["CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      references:
+        - https://firebase.google.com/docs/rules/insecure-rules
+      tags: ["security", "firebase", "firestore", "info-disclosure"]
+      confidence: MEDIUM
+
+  - id: raptorwin.firebase.modo-de-teste
+    message: >-
+      Regra do Firebase em "modo de teste" (`request.time < timestamp.date(...)`): o
+      console a gera abrindo o banco inteiro ate' uma data. Antes da data qualquer
+      pessoa le e escreve tudo; e quem estende a data so' para o app nao parar
+      mantem o banco aberto. Troque por regras reais por usuario.
+    languages: [generic]
+    severity: ERROR
+    paths:
+      include:
+        - "firestore.rules"
+        - "storage.rules"
+        - "*.firestore.rules"
+        - "*.storage.rules"
+    pattern-regex: 'if\s+request\.time\s*<\s*timestamp\.date\('
+    metadata:
+      cwe: ["CWE-862: Missing Authorization"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      references:
+        - https://firebase.google.com/docs/firestore/security/get-started#test-mode
+      tags: ["security", "firebase", "firestore", "test-mode"]
+      confidence: HIGH
+
+  - id: raptorwin.firebase.qualquer-logado-le-tudo
+    message: >-
+      `match /{document=**}` com `request.auth != null` deixa QUALQUER usuario
+      logado (inclusive quem acabou de criar uma conta anonima ou gratuita) ler e
+      escrever todos os documentos. Login nao e' autorizacao: restrinja por dono
+      (`request.auth.uid == resource.data.uid`) ou por papel.
+    languages: [generic]
+    severity: WARNING
+    paths:
+      include:
+        - "firestore.rules"
+        - "storage.rules"
+        - "*.firestore.rules"
+        - "*.storage.rules"
+    pattern-regex: 'match\s+/\{(?:document|allPaths)=\*\*\}\s*\{[^}]*?if\s+request\.auth\s*!=\s*null'
+    metadata:
+      cwe: ["CWE-285: Improper Authorization"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      tags: ["security", "firebase", "firestore", "access-control"]
+      confidence: MEDIUM
+
+  - id: raptorwin.firebase.realtime-db-aberto
+    message: >-
+      Regra do Realtime Database com `".read": true` ou `".write": true`: a URL do
+      banco esta' no JavaScript do site, entao qualquer pessoa le (e, com `.write`,
+      apaga) o banco inteiro por `https://<banco>.firebaseio.com/.json`. Exija
+      `auth != null` e limite por `auth.uid`.
+    languages: [generic]
+    severity: ERROR
+    paths:
+      include:
+        - "database.rules.json"
+        - "*.database.rules.json"
+    pattern-regex: '"\.(?:read|write)"\s*:\s*(?:true|"true")'
+    metadata:
+      cwe: ["CWE-862: Missing Authorization"]
+      owasp_top_10: ["A01:2021-Broken Access Control"]
+      references:
+        - https://firebase.google.com/docs/database/security
+      tags: ["security", "firebase", "realtime-database", "access-control"]
+      confidence: HIGH

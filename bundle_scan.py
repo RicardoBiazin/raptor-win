@@ -47,6 +47,17 @@ _RE_MODULEPRELOAD = re.compile(r"""\brel=["']?[^"'>]*\bmodulepreload\b""", re.IG
 # montado em runtime (webpack: "static/js/"+id+".chunk.js") não é alcançado.
 _RE_CHUNK = re.compile(
     r"""["'`]((?:\.{1,2}/)[\w\-./@~]+\.m?js|/?[\w\-.@~]+/[\w\-./@~]*\.m?js)["'`]""")
+_RE_FIREBASE_DB = re.compile(
+    r"""databaseURL["']?\s*:\s*["'](https://[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9\-]+)?"""
+    r"""\.(?:firebaseio\.com|firebasedatabase\.app))/?["']""", re.I)
+# Estado inicial do SSR (Next/Nuxt): o servidor serializa para o HTML o que a
+# tela recebeu, e o que sobra de campo nessa serialização chega a qualquer visitante.
+_RE_ESTADO_SSR = re.compile(
+    r"""<script[^>]*\bid=["']__NEXT_DATA__["'][^>]*>(.*?)</script>"""
+    r"""|window\.__NUXT__\s*=\s*(.*?)</script>""", re.S | re.I)
+_RE_CHAVE_SENSIVEL = re.compile(
+    r"""["'](password|passwd|senha|password_?hash|secret|api_?key|access_?token|refresh_?token|"""
+    r"""private_?key|ssn|cpf)["']\s*:""", re.I)
 _RE_SUPA_REF = re.compile(r"https://([a-z0-9]{20})\.supabase\.co")
 _RE_PUBLISHABLE = re.compile(r"\bsb_publishable_[A-Za-z0-9_\-]{20,}")
 _RE_JWT = re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
@@ -115,6 +126,18 @@ def _sinal_package(c: bytes) -> bool:
     return isinstance(d, dict) and ("dependencies" in d or "scripts" in d or "name" in d)
 
 
+_RE_HTPASSWD = re.compile(rb"(?m)^[^:\s]+:(?:\$apr1\$|\$2[aby]\$|\{SHA\}|\$5\$|\$6\$)")
+
+
+def _sinal_dump(c: bytes) -> bool:
+    """Dump de banco pelo CONTEÚDO: cabeçalho do pg_dump/mysqldump, ou CREATE TABLE + INSERT."""
+    if _eh_html(c):
+        return False
+    return (b"-- PostgreSQL database dump" in c[:4096] or b"-- MySQL dump" in c[:4096]
+            or b"-- MariaDB dump" in c[:4096]
+            or (b"CREATE TABLE" in c and b"INSERT INTO" in c))
+
+
 SONDAS = [
     (".env", "HIGH", "arquivo de ambiente com valores", _sinal_env),
     (".git/config", "HIGH", "configuração de repositório git",
@@ -128,6 +151,14 @@ SONDAS = [
     ("package.json", "MEDIUM", "manifesto do projeto", _sinal_package),
     (".DS_Store", "LOW", "metadados do macOS", lambda c: c[4:8] == b"Bud1"),
     (".env.local", "HIGH", "arquivo de ambiente local com valores", _sinal_env),
+    (".env.bak", "HIGH", "cópia de backup do arquivo de ambiente com valores", _sinal_env),
+    (".env.old", "HIGH", "cópia antiga do arquivo de ambiente com valores", _sinal_env),
+    (".env.save", "HIGH", "cópia salva do arquivo de ambiente com valores", _sinal_env),
+    (".htpasswd", "HIGH", "arquivo de senhas do servidor web",
+     lambda c: not _eh_html(c) and bool(_RE_HTPASSWD.search(c))),
+    ("backup.sql", "HIGH", "dump do banco de dados", _sinal_dump),
+    ("dump.sql", "HIGH", "dump do banco de dados", _sinal_dump),
+    ("database.sql", "HIGH", "dump do banco de dados", _sinal_dump),
     (".env.production", "HIGH", "arquivo de ambiente de produção com valores", _sinal_env),
     (".git-credentials", "HIGH", "credenciais do git (usuário e token em URL)",
      lambda c: not _eh_html(c) and b"https://" in c and b"@" in c),
@@ -238,6 +269,7 @@ def _achados_texto(url: str, texto: str) -> tuple[list[dict], dict]:
         "tabelas": set(_RE_TABELA.findall(texto)),
         "schemas": set(_RE_SCHEMA.findall(texto)),
         "sourcemaps": _RE_SOURCEMAP.findall(texto),
+        "firebase": set(_RE_FIREBASE_DB.findall(texto)),
     }
     return achados, pistas
 
@@ -271,6 +303,79 @@ def _achados_sourcemap(url_script: str, ref: str, bus) -> list[dict]:
                     f"Source map público com o código-fonte original ({len(fontes)} "
                     f"arquivo(s)). Quem o baixa lê a aplicação inteira. Desligue o "
                     f"sourcemap no build de produção.")]
+
+
+def _sondar_firebase(db: str, bus) -> list[dict]:
+    """Realtime Database aberto: `?shallow=true` devolve só os NOMES dos nós de topo.
+
+    Nunca baixa valor nenhum: com `shallow`, o Firebase responde `{"users": true}`.
+    401 ("Permission denied") é o resultado bom e não vira achado.
+    """
+    r = bus(f"{db}/.json?shallow=true")
+    if not r or r.status != 200:
+        return []
+    try:
+        dados = json.loads(r.corpo)
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(dados, dict) or not dados:
+        return []  # `null` = banco vazio (ou nó inexistente): nada lido, nada exposto
+    nos = sorted(dados)
+    amostra = ", ".join(nos[:10]) + (" …" if len(nos) > 10 else "")
+    return [_achado(
+        "bundle.firebase-leitura-anonima", "HIGH", db,
+        f"Realtime Database do Firebase legível SEM login: {len(nos)} nó(s) de topo "
+        f"({amostra}). Valores não lidos. A URL está no JavaScript do site, então qualquer "
+        f"pessoa baixa o banco por `{db}/.json`. Feche as regras (`\".read\": false`) e "
+        f"exija `auth != null` e dono por `auth.uid`.", evidencia=True)]
+
+
+def _achados_estado_ssr(url: str, html: str) -> list[dict]:
+    """`__NEXT_DATA__` / `__NUXT__`: segredos e campos que não deveriam ir ao navegador."""
+    achados = []
+    for m in _RE_ESTADO_SSR.finditer(html):
+        bloco = m.group(1) or m.group(2) or ""
+        ach, _ = _achados_texto(url, bloco)
+        achados += ach
+        chave = _RE_CHAVE_SENSIVEL.search(bloco)
+        if chave:
+            achados.append(_achado(
+                "bundle.estado-ssr-campo-sensivel", "MEDIUM", url,
+                f"O estado inicial da página (`__NEXT_DATA__`/`__NUXT__`) carrega um campo "
+                f"`{chave.group(1)}`. O servidor serializa para o HTML tudo o que a tela recebeu, "
+                f"então o campo chega a qualquer visitante, mesmo sem aparecer na tela. "
+                f"Selecione só as colunas que a tela usa."))
+    return achados
+
+
+_COOKIES_DO_SUPABASE = re.compile(r"^sb-[a-z0-9\-]+-auth-token(\.\d+)?$", re.I)
+
+
+def _achados_cookies(url: str, pag) -> list[dict]:
+    """Atributos do `Set-Cookie` da página: só o que ela mesma já devolveu."""
+    achados = []
+    # `Resp.headers` junta cabeçalhos repetidos pela última ocorrência; quando houver
+    # mais de um cookie só o último é visto. Melhor um falso negativo que inventar.
+    bruto = pag.headers.get("set-cookie")
+    if not bruto:
+        return achados
+    nome = bruto.split("=", 1)[0].strip()
+    atributos = [a.strip().lower() for a in bruto.split(";")[1:]]
+    https = url.lower().startswith("https://")
+    faltam = []
+    if https and "secure" not in atributos:
+        faltam.append("Secure")
+    if "httponly" not in atributos and not _COOKIES_DO_SUPABASE.match(nome):
+        faltam.append("HttpOnly")
+    if not any(a.startswith("samesite") for a in atributos):
+        faltam.append("SameSite")
+    if faltam:
+        achados.append(_achado(
+            "bundle.cookie-sem-atributo", "LOW", url,
+            f"O cookie `{nome}` vem sem {', '.join(faltam)}. Sem Secure ele viaja em HTTP; "
+            f"sem HttpOnly um script injetado o lê; sem SameSite o navegador o envia em "
+            f"requisições de outros sites.", evidencia=True))
+    return achados
 
 
 def _sondar_tabelas(origem_ref: str, chave: str, tabelas: set, schemas: set, bus) -> list[dict]:
@@ -340,6 +445,7 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
                                    "Página não respondeu com sucesso; nada foi verificado."))
             continue
         achados += _achados_cabecalhos(url, pag)
+        achados += _achados_cookies(url, pag)
 
         texto_pag = pag.corpo.decode("utf-8", "replace")
         m_ger = _RE_META_GERADOR.search(texto_pag)
@@ -349,6 +455,7 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
                 "bundle.versao-exposta", "LOW", url,
                 f'`<meta name="generator" content="{gerador}">` anuncia produto e versão '
                 f"(comum em WordPress/Joomla/Drupal). Remova a meta tag.", evidencia=True))
+        achados += _achados_estado_ssr(url, texto_pag)
         scripts = []
         for src in _RE_SCRIPT.findall(texto_pag):
             absoluto = urljoin(url, src)
@@ -386,6 +493,7 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
 
         refs, tabelas, schemas = set(), set(), set()
         publishable = anon_jwt = None
+        firebase_dbs: set[str] = set()
         libs_vistas: set[tuple[str, str]] = set()
         libs_achados: list[dict] = []
         libs_detalhes: dict[str, dict] = {}
@@ -403,6 +511,7 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
             refs |= pistas["refs"]
             tabelas |= pistas["tabelas"]
             schemas |= pistas["schemas"]
+            firebase_dbs |= pistas["firebase"]
             publishable = publishable or pistas["publishable"]
             anon_jwt = anon_jwt or pistas["anon_jwt"]
             # Source map também pode vir pelo cabeçalho, sem comentário no arquivo.
@@ -456,6 +565,9 @@ def escanear_urls(urls: list[str], buscar_fn=buscar) -> list[dict]:
                     f"{origem}/{caminho}",
                     f"Caminho público que deveria ser privado: {desc}. Quem acessa lê o "
                     f"conteúdo. Retire do build e confira o que já foi publicado."))
+
+        for db in sorted(firebase_dbs)[:3]:
+            achados += _sondar_firebase(db, bus)
 
         chave = publishable or anon_jwt
         if chave:

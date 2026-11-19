@@ -31,6 +31,8 @@ import json
 import re
 from pathlib import Path
 
+import typosquat
+
 _DATA = Path(__file__).resolve().parent / "data"
 
 # Hosts de registro público. O que vier de fora daqui não passou pela
@@ -274,6 +276,104 @@ def _achados_deno(arq: Path, rel: str, raiz: Path) -> list[dict]:
     return achados
 
 
+# ---------------------------------------------------------------------------
+# Servidores MCP / ferramentas de agente configurados no repositório
+# ---------------------------------------------------------------------------
+# `.mcp.json` (Claude Code), `.cursor/mcp.json`, `.vscode/mcp.json`,
+# `claude_desktop_config.json`, `.gemini/settings.json`: cada entrada manda o
+# editor EXECUTAR um comando na máquina de quem abre o projeto. `npx -y pacote`
+# sem versão baixa e roda a última publicação, com os acessos do desenvolvedor:
+# pacote tomado, ou digitado errado (typosquat), vira código rodando na máquina
+# dele. Ideia da skill `npx_confusion` do strix (Apache-2.0).
+_ARQ_MCP_NOME = {".mcp.json", "claude_desktop_config.json"}
+_ARQ_MCP_PASTA = {"mcp.json": {".cursor", ".vscode", ".windsurf"},
+                  "settings.json": {".gemini", ".claude"}}
+_RUNNERS = {"npx": "npm", "bunx": "npm", "uvx": "PyPI", "pipx": "PyPI"}
+_LOCAL = re.compile(r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?(/|$)", re.I)
+
+
+def e_config_mcp(arq: Path) -> bool:
+    return (arq.name in _ARQ_MCP_NOME
+            or arq.parent.name in _ARQ_MCP_PASTA.get(arq.name, ()))
+
+
+def _pacote_do_comando(cmd: str, args: list) -> tuple[str, str, str] | None:
+    """(ecossistema, nome, versão-ou-'') do pacote que o comando baixa e executa."""
+    base = Path(cmd).name.lower().removesuffix(".cmd").removesuffix(".exe")
+    lista = [str(a) for a in args]
+    if base in ("pnpm", "yarn", "npm") and lista[:1] in (["dlx"], ["exec"]):
+        base, lista = "npx", lista[1:]
+    if base not in _RUNNERS:
+        return None
+    eco = _RUNNERS[base]
+    if base == "pipx" and lista[:1] == ["run"]:
+        lista = lista[1:]
+    for a in lista:
+        if a.startswith("-"):
+            continue
+        if a.startswith(("http://", "https://", "git+", "file:", ".", "/")):
+            return None  # fonte direta: outro tipo de risco, não é pacote do registro
+        if eco == "npm":
+            m = re.match(r"^(@[^/@]+/[^/@]+|[^/@]+)(?:@(.+))?$", a)
+            return (eco, m.group(1), m.group(2) or "") if m else None
+        nome, _, ver = a.partition("@")
+        nome, _, igual = nome.partition("==")
+        return eco, nome, ver or igual
+    return None
+
+
+def _achados_mcp(caminho: Path, rel: str) -> list[dict]:
+    try:
+        dados = json.loads(caminho.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    servidores = {}
+    if isinstance(dados, dict):
+        for chave in ("mcpServers", "servers", "mcp_servers"):
+            if isinstance(dados.get(chave), dict):
+                servidores.update(dados[chave])
+    texto = caminho.read_text(encoding="utf-8", errors="replace").splitlines()
+    achados: list[dict] = []
+    pacotes = []
+
+    def linha_de(trecho: str) -> int:
+        return next((i + 1 for i, l in enumerate(texto) if trecho in l), 1)
+
+    for nome, cfg in servidores.items():
+        if not isinstance(cfg, dict):
+            continue
+        pac = _pacote_do_comando(str(cfg.get("command") or ""), cfg.get("args") or [])
+        if pac:
+            eco, pkg, ver = pac
+            pacotes.append((eco, pkg, ver or ""))
+            if not ver or ver in ("latest", "*") or ver.startswith(("^", "~", ">")):
+                achados.append({
+                    "rule": "supply.mcp-sem-versao-fixa", "severity": "MEDIUM", "context": "",
+                    "path": rel, "line": linha_de(pkg), "evidencia": "confirmado",
+                    "cwe": ["CWE-829"],
+                    "message": (
+                        f"O servidor MCP `{nome}` roda `{pkg}` sem versão fixa ({eco}): cada vez "
+                        f"que alguém abre o projeto, o editor baixa e EXECUTA a última publicação, "
+                        f"com os acessos do desenvolvedor (arquivos, chaves, rede). Um pacote "
+                        f"tomado ou com nome trocado vira código rodando na máquina. Fixe "
+                        f"`{pkg}@X.Y.Z`.")})
+        url = cfg.get("url")
+        if isinstance(url, str) and url.lower().startswith("http://") and not _LOCAL.match(url):
+            achados.append({
+                "rule": "supply.mcp-http", "severity": "MEDIUM", "context": "",
+                "path": rel, "line": linha_de(url), "evidencia": "confirmado",
+                "cwe": ["CWE-319"],
+                "message": (f"O servidor MCP `{nome}` usa `{url}` em HTTP puro: o que o agente "
+                            f"envia (e as ferramentas que recebe) passa em texto aberto e pode "
+                            f"ser alterado no caminho. Use HTTPS.")})
+    for a in typosquat.escanear(pacotes):
+        achados.append({
+            "rule": "typosquat", "severity": a["severity"].upper(), "context": "SCA · MCP",
+            "path": rel, "line": linha_de(a["name"]),
+            "message": f"servidor MCP: {a['name']}: {a['reason']}"})
+    return achados
+
+
 def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
     achados: list[dict] = []
     vistos: set[tuple] = set()
@@ -295,6 +395,8 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
                 novos = _achados_do_requirements(arq, rel)
             elif e_fonte_deno(arq):
                 novos = _achados_deno(arq, rel, raiz)
+            elif e_config_mcp(arq):
+                novos = _achados_mcp(arq, rel)
             else:
                 continue
             for a in novos:

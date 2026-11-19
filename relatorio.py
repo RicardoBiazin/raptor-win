@@ -68,7 +68,7 @@ PREFIXO_OWASP = [
     ("headers.", "A05"),
 ]
 
-_RE_LGPD = re.compile(r"privacidade\.dado-pessoal|dado-pessoal-em-demo")
+_RE_LGPD = re.compile(r"privacidade\.dado-pessoal|dado-pessoal-em-demo|dump-de-banco")
 _RE_PREFIXO = {p: re.compile(rf"(^|\.){re.escape(p)}") for p, _ in PREFIXO_OWASP}
 # NOME=valor sem aspas (formato de .env). ATRIBUICAO_RE do secrets_scan exige aspas.
 _RE_ATRIB_SOLTA = re.compile(
@@ -187,6 +187,51 @@ def trecho(raiz: Path, path: str, line: int) -> str | None:
     return None
 
 
+# Meta de verificação por família de regra: o que dá para conferir de fora, sem
+# ler o código, depois da correção. Complementa o "acrescente um teste" genérico.
+# Ideia das listas "verification goals" do AI-CHECKLIST do opencode-pentester (MIT).
+_METAS = [
+    (re.compile(r"(?i)secrets?\.|segredo|credencia|jwt-service-role|env-"),
+     "`git ls-files` não lista o arquivo de segredo, a chave antiga foi REVOGADA no provedor "
+     "e a nova só existe em variável de ambiente."),
+    (re.compile(r"(?i)anon-le-tabela|rls|db\.|sql\.|policy|supabase|grant-execute"),
+     "uma requisição só com a chave pública (`curl <url>/rest/v1/<tabela>?select=*&limit=1`, "
+     "sem login) devolve `[]` ou 401/403."),
+    (re.compile(r"(?i)cors"),
+     "a resposta traz `Access-Control-Allow-Origin` com uma origem explícita: nunca `*` junto "
+     "de credenciais e nunca o `Origin` recebido refletido."),
+    (re.compile(r"(?i)headers\.|bundle\.sem-(csp|hsts|protecao)|\bcsp\b|hsts"),
+     "`curl -sI <site>` mostra Content-Security-Policy, Strict-Transport-Security, "
+     "X-Content-Type-Options: nosniff, Referrer-Policy e frame-ancestors/X-Frame-Options."),
+    (re.compile(r"(?i)erro-de-banco|error-leak"),
+     "o cliente recebe só uma mensagem genérica; o erro detalhado fica no log do servidor."),
+    (re.compile(r"(?i)sourcemap"),
+     "`curl -I <site>/assets/<arquivo>.js.map` devolve 404 e o bundle não tem `sourceMappingURL`."),
+    (re.compile(r"(?i)jwt"),
+     "um token com o payload alterado (ou vencido) é recusado com 401."),
+    (re.compile(r"(?i)xss|href-scheme|innerhtml"),
+     "o texto `<img src=x onerror=alert(1)>` (e um link `javascript:alert(1)`) aparece como "
+     "texto ou é descartado, e nada executa."),
+    (re.compile(r"(?i)ssrf"),
+     "uma URL para `http://127.0.0.1`, `http://169.254.169.254` ou um host fora da lista "
+     "permitida é recusada pelo servidor."),
+    (re.compile(r"(?i)^(GHSA|PYSEC|CVE|OSV)-|supply\.(?!binario|executavel|compactado|wrapper)"
+                r"|typosquat|lib-vulneravel"),
+     "o `raptor-win --sca` (ou `npm audit` / `pip-audit`) não lista mais o pacote, e a "
+     "versão corrigida está fixada no lockfile."),
+    (re.compile(r"(?i)binario|executavel|compactado"),
+     "`git ls-files` não lista mais o binário; ele é gerado no build ou publicado como release."),
+]
+
+
+def meta_verificacao(f: dict) -> str | None:
+    rule = f.get("rule", "")
+    for rx, meta in _METAS:
+        if rx.search(rule):
+            return meta
+    return None
+
+
 def prompt_correcao(f: dict, trecho_codigo: str | None = None) -> str:
     """Texto para colar num assistente de código. Sem valor sensível, nunca."""
     local = mascarar(f"{f['path']}:{f['line']}" if f.get("line") else f.get("path", ""))
@@ -198,6 +243,7 @@ def prompt_correcao(f: dict, trecho_codigo: str | None = None) -> str:
             "O achado envolve um valor sensível. O valor NÃO aparece neste texto, de propósito.",
             "Remova-o do código e do histórico do repositório, troque a credencial ou o dado "
             "no provedor e use variável de ambiente ou o cofre de segredos do projeto.",
+            "", f"Meta de verificação: {meta_verificacao(f) or _METAS[0][1]}",
         ]
         return "\n".join(linhas)
     if f.get("message"):
@@ -206,6 +252,9 @@ def prompt_correcao(f: dict, trecho_codigo: str | None = None) -> str:
         linhas += ["Linha afetada:", "```", mascarar(trecho_codigo), "```", ""]
     linhas += ["Corrija a causa, sem mudar o comportamento esperado do código.",
                "Acrescente um teste que falha antes da correção e passa depois."]
+    meta = meta_verificacao(f)
+    if meta:
+        linhas += ["", f"Meta de verificação (confira de fora, sem ler o código): {meta}"]
     return "\n".join(linhas)
 
 
@@ -225,6 +274,29 @@ def categoria_owasp(f: dict) -> str | None:
     return None
 
 
+# O que uma varredura estática NÃO prova. Uma linha "0 achados" nestas categorias
+# não quer dizer "seguro": quer dizer "o método não alcança". Ideia da seção
+# `coverage_gaps` do REPORT_CONTRACT do vibe-check / opencode-pentester (MIT).
+NAO_VERIFICAVEL = {
+    "A01": "acesso por objeto (um usuário ler o registro de outro) e rotas sem checagem de login",
+    "A04": "limite de tentativas (rate limit) e regras de negócio",
+    "A07": "login em TODA rota protegida, CSRF e sessão",
+    "A09": "se o log existe e se alguém o lê",
+}
+
+TESTES_A_MAO = [
+    ("A01", "Repita uma requisição de usuário logado SEM o token.", "401 ou 403, nunca os dados."),
+    ("A01", "Com o usuário A, peça o ID de um registro do usuário B.", "403 ou 404, nunca o registro."),
+    ("A01", "`curl <url>/rest/v1/<tabela>?select=*&limit=1` só com a chave pública.",
+     "`[]`, 401 ou 403."),
+    ("A04", "Envie 30 pedidos seguidos ao login e ao envio de e-mail/SMS.",
+     "429 ou bloqueio antes do 30º."),
+    ("A07", "Reuse um token vencido e um token com o payload alterado.", "401 nos dois."),
+    ("A09", "Provoque um erro (ID inexistente) e leia a resposta ao cliente.",
+     "Mensagem genérica, sem stack, SQL ou nome de tabela."),
+]
+
+
 def checklist(achados: list[dict]) -> dict:
     """Indícios por categoria OWASP e por item LGPD. Não é avaliação de conformidade."""
     owasp = {cod: {"titulo": titulo, "achados": 0, "regras": set()} for cod, titulo in OWASP.items()}
@@ -237,8 +309,9 @@ def checklist(achados: list[dict]) -> dict:
         if _RE_LGPD.search(f.get("rule", "")):
             lgpd["achados"] += 1
             lgpd["regras"].add(_curta(f["rule"]))
-    for item in owasp.values():
+    for cod, item in owasp.items():
         item["regras"] = sorted(item["regras"])
+        item["limite"] = NAO_VERIFICAVEL.get(cod)
     lgpd["regras"] = sorted(lgpd["regras"])
     return {"owasp": owasp, "lgpd": lgpd}
 
@@ -295,8 +368,16 @@ def bloco_executivo_md(reais: list[dict], nota: int, res: dict, raiz: Path) -> s
                "| Categoria OWASP Top 10 (2021) | Achados | Regras |", "|---|---|---|"]
     ck = checklist(reais)
     for cod, item in ck["owasp"].items():
-        linhas.append(f"| {cod} {item['titulo']} | {item['achados']} | "
+        n = f"{item['achados']} (não prova ausência)" if item["limite"] and not item["achados"] \
+            else str(item["achados"])
+        linhas.append(f"| {cod} {item['titulo']} | {n} | "
                       f"{', '.join(item['regras']) or '—'} |")
+    linhas += ["", "### Não verificável por análise estática", "",
+               "Estas categorias mostram `0` porque o método não alcança, não porque estejam "
+               "seguras. Confira à mão:", ""]
+    linhas += [f"- **{cod}** — {texto}" for cod, texto in NAO_VERIFICAVEL.items()]
+    linhas += ["", "| Cat. | Teste à mão | Esperado |", "|---|---|---|"]
+    linhas += [f"| {c} | {t} | {e} |" for c, t, e in TESTES_A_MAO]
     linhas += ["", f"**LGPD (dado pessoal):** {ck['lgpd']['achados']} indício(s)"
                + (f" — {', '.join(ck['lgpd']['regras'])}" if ck["lgpd"]["regras"] else "."), "",
                "### Prompts de correção", ""]
@@ -357,9 +438,18 @@ def html_relatorio(reais: list[dict], res: dict, nota: int, raiz: Path, alvo: st
                "<p class=\"aviso\">Indícios encontrados nesta varredura, não avaliação de conformidade.</p>",
                "<table><tr><th>Categoria OWASP Top 10 (2021)</th><th>Achados</th><th>Regras</th></tr>"]
     for cod, item in ck["owasp"].items():
-        partes.append(f"<tr><td>{_e(cod)} {_e(item['titulo'])}</td><td>{item['achados']}</td>"
+        n = f"{item['achados']} <span class=\"aviso\">(não prova ausência)</span>" \
+            if item["limite"] and not item["achados"] else str(item["achados"])
+        partes.append(f"<tr><td>{_e(cod)} {_e(item['titulo'])}</td><td>{n}</td>"
                       f"<td>{_e(', '.join(item['regras']) or '—')}</td></tr>")
     partes.append("</table>")
+    partes.append("<h3>Não verificável por análise estática</h3><p class=\"aviso\">Estas "
+                  "categorias mostram 0 porque o método não alcança, não porque estejam seguras. "
+                  "Confira à mão:</p><ul>"
+                  + "".join(f"<li><b>{_e(c)}</b> — {_e(t)}</li>" for c, t in NAO_VERIFICAVEL.items())
+                  + "</ul><table><tr><th>Cat.</th><th>Teste à mão</th><th>Esperado</th></tr>"
+                  + "".join(f"<tr><td>{_e(c)}</td><td>{_e(t)}</td><td>{_e(e)}</td></tr>"
+                            for c, t, e in TESTES_A_MAO) + "</table>")
     partes.append(f"<p><b>LGPD (dado pessoal):</b> {ck['lgpd']['achados']} indício(s)"
                   + (f" — {_e(', '.join(ck['lgpd']['regras']))}" if ck["lgpd"]["regras"] else "") + "</p></div>")
     partes.append("<h2>Achados e prompts de correção</h2>")

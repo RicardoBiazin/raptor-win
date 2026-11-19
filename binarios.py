@@ -65,6 +65,32 @@ def _tipo(cab: bytes, ext: str) -> tuple[str, str] | None:
     return None
 
 
+# Cabeçalhos que pg_dump/mysqldump escrevem. Só o cabeçalho NÃO basta: um dump
+# só de esquema (`supabase db dump`, baseline de migração) é legítimo. O que vaza é
+# dump COM LINHAS: `COPY ... FROM stdin;` no Postgres e `INSERT INTO` no MySQL.
+_CAB_DUMP = (b"-- PostgreSQL database dump", b"-- MySQL dump", b"-- MariaDB dump")
+_LIMITE_DUMP = 256 * 1024 * 1024
+
+
+def _dump_de_banco(arq: Path, cab: bytes, ext: str) -> str | None:
+    """Descrição se o arquivo é dump de banco COM DADOS; None se não é ou só tem esquema."""
+    if cab.startswith(b"PGDMP"):
+        return "dump binário do PostgreSQL (pg_dump -Fc)"
+    if not any(c in cab for c in _CAB_DUMP) and ext not in (".dump", ".bak", ".backup"):
+        return None
+    try:
+        with arq.open("rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            if not any(m.find(c, 0, 8192) != -1 for c in _CAB_DUMP):
+                return None
+            if m.find(b"\nCOPY ") != -1 and m.find(b" FROM stdin;") != -1:
+                return "dump do PostgreSQL com dados (COPY ... FROM stdin)"
+            if m.find(b"\nINSERT INTO ") != -1:
+                return "dump de banco com dados (INSERT INTO)"
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def _marcador(arq: Path, cab: bytes) -> str | None:
     for marca, nome in _EMPACOTADORES:
         if marca in cab:
@@ -107,6 +133,21 @@ def escanear(alvos: list[Path], skip_dirs: set[str]) -> list[dict]:
             except OSError:
                 continue
             ext = arq.suffix.lower()
+            dump = _dump_de_banco(arq, cab, ext) if tam <= _LIMITE_DUMP else None
+            if dump:
+                try:
+                    rel_d = str(arq.relative_to(Path.cwd())).replace("\\", "/")
+                except ValueError:
+                    rel_d = str(arq).replace("\\", "/")
+                achados.append({
+                    "rule": "secrets.dump-de-banco-versionado", "severity": "HIGH",
+                    "path": rel_d, "line": 1, "context": "", "evidencia": "confirmado",
+                    "cwe": ["CWE-538"],
+                    "message": (f"{dump} versionado no repositório ({tam / 1024:.0f} KB). Dump "
+                                f"com dados costuma ter dado pessoal (LGPD) e fica no histórico "
+                                f"para sempre. Tire do git, reescreva o histórico se o repositório "
+                                f"é ou foi público, e troque senhas e chaves que estavam no banco.")})
+                continue
             tipo = _tipo(cab, ext)
             if not tipo:
                 continue
