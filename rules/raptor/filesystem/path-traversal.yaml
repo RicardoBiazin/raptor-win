@@ -7,7 +7,7 @@ rules:
   # every dynamically-built path in the codebase.
 
   - id: raptor.files.path_traversal.python
-    message: Python open() with concatenated user input; canonicalise and validate inputs.
+    message: Path construction reaches Python open(); review input origin, allowed roots and effective path before claiming traversal.
     languages: [python]
     severity: HIGH
     patterns:
@@ -20,7 +20,7 @@ rules:
       cwe: ["CWE-22"]
 
   - id: raptor.files.path_traversal.js
-    message: JavaScript path construction from user input; validate or normalise paths.
+    message: Path construction reaches a JavaScript filesystem API; review input origin, allowed roots and effective path before claiming traversal.
     languages: [javascript, typescript]
     severity: HIGH
     patterns:
@@ -54,7 +54,8 @@ rules:
           - pattern: Path($PATH)
     # No abspath/resolve sanitizers: both NORMALISE the path — they
     # resolve "../" so the escape takes effect, they do not confine
-    # it. basename genuinely confines (strips directory components).
+    # it. basename strips directory components, but dot-parent names and
+    # filesystem links still require a separate confinement check.
     pattern-sanitizers:
       - pattern: os.path.basename(...)
         exact: true

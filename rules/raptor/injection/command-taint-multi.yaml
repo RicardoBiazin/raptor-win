@@ -1,14 +1,16 @@
 rules:
   # ---------------------------------------------------------------------------
   # Go — taint: net/http handler params → command execution sinks
-  # exec.Command("ls", "-la") with separate args is safe. The real sink is
-  # exec.Command("sh", "-c", tainted) where the shell interprets the input.
+  # Distinguish shell command text from executable-name arguments.
+  # Separate arguments avoid implicit shell parsing; executable selection
+  # and program-specific argument semantics still require review.
   # ---------------------------------------------------------------------------
   - id: raptor.injection.command.taint.go
     message: >-
-      Untrusted data flows into command execution via a shell interpreter.
-      Avoid passing user input through sh -c. Use exec.Command() with
-      separate arguments instead.
+      Potentially untrusted data reaches shell command text or an executable-name
+      argument. Review the actual program, command construction and input validation.
+      Keep executable names fixed or allowlisted and avoid shell parsing where it
+      is not required.
     languages: [go]
     severity: CRITICAL
     mode: taint
@@ -68,9 +70,7 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.injection.command.taint.java
     message: >-
-      Untrusted data flows into command execution. Avoid Runtime.exec() and
-      ProcessBuilder with user-controlled arguments. Use a safe API or
-      strict input validation with an allowlist.
+      Potentially untrusted data reaches command construction or execution APIs. Review the actual executable, argument structure and whether the command is started. Keep executable names fixed or allowlisted and validate arguments for the selected program.
     languages: [java]
     severity: CRITICAL
     mode: taint
@@ -117,7 +117,8 @@ rules:
         to: $A
     pattern-sinks:
       - pattern-either:
-          # Runtime.exec — string form invokes the shell
+          # Runtime.exec — string forms split command text into arguments;
+          # shell interpretation requires an explicitly selected interpreter.
           - pattern: Runtime.getRuntime().exec($CMD)
           - pattern: Runtime.getRuntime().exec($CMD, ...)
           # Variable receiver (Runtime r = Runtime.getRuntime();
@@ -142,9 +143,7 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.injection.command.taint.javascript
     message: >-
-      Untrusted data flows into command execution. Avoid child_process.exec()
-      and spawn with shell:true. Use execFile() or spawn() without shell
-      option and pass arguments as an array.
+      Potentially untrusted data reaches shell command APIs or dynamic JavaScript code construction. Review the selected API, shell option, input origin and whether constructed code is executed. Prefer fixed programs with argument arrays and avoid interpreting untrusted code.
     languages: [javascript, typescript]
     severity: CRITICAL
     mode: taint

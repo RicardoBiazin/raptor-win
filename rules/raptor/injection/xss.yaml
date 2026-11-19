@@ -4,8 +4,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.injection.xss.taint.python
     message: >-
-      Untrusted data flows into an HTML response without escaping. Use
-      context-aware output encoding or a templating engine with auto-escaping.
+      Request-derived data reaches an HTML-related construction, rendering or
+      response API. Review the matched argument, eventual output context and
+      escaping before treating it as executable markup. Use context-appropriate
+      output encoding and retain template auto-escaping.
     languages: [python]
     severity: CRITICAL
     mode: taint
@@ -25,8 +27,7 @@ rules:
           - pattern: flask.request.form.get(...)
           - pattern: flask.request.json[...]
           - pattern: flask.request.get_json(...)
-          # FastAPI / Starlette
-          - pattern: request.query_params[...]
+          # FastAPI / Starlette (query_params is shared above)
           - pattern: request.path_params[...]
           # Generic
           - pattern: input(...)
@@ -74,9 +75,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.injection.xss.taint.go
     message: >-
-      Untrusted data flows into an HTML response without escaping. Use
-      html/template (auto-escaping) instead of text/template, or call
-      template.HTMLEscapeString() before writing.
+      Request or environment data reaches a template trusted-content conversion.
+      Review the eventual HTML, JavaScript, CSS or attribute context before
+      treating the converted value as safe. Retain template auto-escaping and
+      use encoding appropriate to the output context.
     languages: [go]
     severity: CRITICAL
     mode: taint
@@ -126,9 +128,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.injection.xss.taint.java
     message: >-
-      Untrusted data flows into an HTML response without escaping. Use a
-      context-aware encoder such as OWASP Java Encoder or a templating engine
-      with auto-escaping.
+      Request-derived data reaches a response or writer API. Review the writer's
+      destination, response content type and output context before treating it
+      as executable markup. Use context-appropriate encoding or retain template
+      auto-escaping for HTML output.
     languages: [java]
     severity: CRITICAL
     mode: taint
@@ -262,8 +265,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.injection.xss.taint.javascript
     message: >-
-      Untrusted data flows into an HTML response or DOM sink without
-      sanitisation. Use a context-aware encoder or DOMPurify.
+      Request or environment data reaches an HTML-related assignment or
+      output API. Review the receiver, eventual output context and sanitisation
+      before treating it as executable markup. Use context-appropriate encoding
+      or HTML sanitisation for the actual destination.
     languages: [javascript, typescript]
     severity: CRITICAL
     mode: taint

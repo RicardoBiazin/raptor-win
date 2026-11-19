@@ -26,8 +26,7 @@ rules:
           - pattern: flask.request.form.get(...)
           - pattern: flask.request.json[...]
           - pattern: flask.request.get_json(...)
-          # FastAPI / Starlette
-          - pattern: request.query_params[...]
+          # FastAPI / Starlette (query_params is shared above)
           - pattern: request.path_params[...]
           # Generic
           - pattern: input(...)
@@ -91,9 +90,7 @@ rules:
       - pattern-either:
           # net/http
           - pattern: http.Redirect($W, $R, $URL, ...)
-          # gin
-          - pattern: $CTX.Redirect($CODE, $URL)
-          # echo
+          # gin / echo
           - pattern: $CTX.Redirect($CODE, $URL)
           # Manual header set
           - pattern: $W.Header().Set("Location", $URL)

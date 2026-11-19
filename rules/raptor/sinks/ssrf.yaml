@@ -4,8 +4,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.web.ssrf.taint.python
     message: >-
-      Untrusted data flows into an outbound HTTP request. Enforce a strict
-      URL allowlist or use a proxy with egress controls.
+      Potentially untrusted data reaches a URL-related construction or request
+      API. Review the actual callee, controlled URL components, request issuance
+      and destination checks. Use a strict destination allowlist or egress
+      controls where untrusted data can choose the request target.
     languages: [python]
     severity: CRITICAL
     mode: taint
@@ -25,8 +27,7 @@ rules:
           - pattern: flask.request.form.get(...)
           - pattern: flask.request.json[...]
           - pattern: flask.request.get_json(...)
-          # FastAPI / Starlette (function params are the source)
-          - pattern: request.query_params[...]
+          # FastAPI / Starlette (query_params is shared above)
           - pattern: request.path_params[...]
           # Generic
           - pattern: input(...)
@@ -85,8 +86,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.web.ssrf.taint.go
     message: >-
-      Untrusted data flows into an outbound HTTP request. Enforce a strict
-      URL allowlist or use a proxy with egress controls.
+      Potentially untrusted data reaches a URL-related construction or request
+      API. Review the actual callee, controlled URL components, request issuance
+      and destination checks. Use a strict destination allowlist or egress
+      controls where untrusted data can choose the request target.
     languages: [go]
     severity: CRITICAL
     mode: taint
@@ -145,8 +148,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.web.ssrf.taint.java
     message: >-
-      Untrusted data flows into an outbound HTTP request. Enforce a strict
-      URL allowlist or use a proxy with egress controls.
+      Potentially untrusted data reaches a URL-related construction or request
+      API. Review the actual callee, controlled URL components, request issuance
+      and destination checks. Use a strict destination allowlist or egress
+      controls where untrusted data can choose the request target.
     languages: [java]
     severity: CRITICAL
     mode: taint
@@ -199,8 +204,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.web.ssrf.taint.javascript
     message: >-
-      Untrusted data flows into an outbound HTTP request. Enforce a strict
-      URL allowlist or use a proxy with egress controls.
+      Potentially untrusted data reaches a URL-related construction or request
+      API. Review the actual callee, controlled URL components, request issuance
+      and destination checks. Use a strict destination allowlist or egress
+      controls where untrusted data can choose the request target.
     languages: [javascript, typescript]
     severity: CRITICAL
     mode: taint
@@ -293,8 +300,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.web.ssrf.cloud-metadata
     message: >-
-      Hardcoded cloud metadata endpoint. If this URL is constructed from
-      user input, it is a confirmed SSRF to the instance metadata service.
+      Text contains a cloud-metadata address or hostname prefix. Review the
+      complete URL authority, actual request use and attacker control before
+      classifying it as SSRF. Restrict access to metadata services where the
+      application does not require it.
     languages: [python, go, java, javascript, typescript]
     severity: HIGH
     pattern-regex: "http://(169\\.254\\.169\\.254|metadata\\.google\\.internal|100\\.100\\.100\\.200)"
@@ -307,9 +316,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.web.ssrf.redirect-following.python
     message: >-
-      httpx does not follow redirects by default; enabling
-      follow_redirects=True lets an SSRF via open redirect bypass URL
-      allowlists. Validate redirect targets or leave redirects off.
+      Redirect following is enabled on an httpx-shaped call. Review the actual
+      API and whether redirect targets are checked against the destination
+      policy. Disable redirects or validate every target where an untrusted
+      redirect could change the request destination.
     languages: [python]
     severity: MEDIUM
     # requests' allow_redirects=True is deliberately NOT flagged: it

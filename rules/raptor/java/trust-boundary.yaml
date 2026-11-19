@@ -11,16 +11,16 @@ rules:
   # No pattern-sanitizers on purpose: the idioms that genuinely establish
   # trust (allowlist validation, canonicalisation-then-check) are
   # branch-shaped and cannot be soundly expressed as taint-mode sanitizers
-  # without name-guessing false-negative risk. Guard adequacy is adjudicated
-  # downstream (Z3 prescreen / LLM validation), matching the SSRF rules'
-  # posture.
+  # without name-guessing false-negative risk. Guard adequacy still requires
+  # review of the original source and its consumers. Conditional prescreen
+  # models, where available, are diagnostics rather than source-level proof.
   # ---------------------------------------------------------------------------
   - id: raptor.java.trust-boundary-session-write
     message: >-
-      Untrusted request data is stored in the session or servlet context
-      without validation — code reading these attributes typically treats
-      them as trusted (CWE-501 trust boundary violation). Validate against
-      an allowlist before crossing the boundary.
+      Request-derived data reaches a session or servlet-context attribute
+      write (CWE-501 review candidate). Review validation guards, the attribute
+      key and value, and downstream readers before treating the stored data as
+      trusted. Apply an appropriate allowlist where a trust boundary requires it.
     languages: [java]
     severity: MEDIUM
     mode: taint

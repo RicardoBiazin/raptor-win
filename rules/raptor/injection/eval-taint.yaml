@@ -9,9 +9,10 @@ rules:
   # ---------------------------------------------------------------------------
   - id: raptor.injection.eval.taint.python
     message: >-
-      Untrusted data flows into eval(), exec(), or compile(). An attacker
-      can execute arbitrary Python code. Use ast.literal_eval() for safe
-      evaluation of literal expressions, or avoid dynamic code execution.
+      Potentially untrusted data reaches eval(), exec(), or compile(). Review
+      its origin and how each API is used; compilation alone does
+      not execute it. Avoid interpreting untrusted code. Literal parsing is
+      an alternative for data expressions, not a sanitiser for a later sink.
     languages: [python]
     severity: CRITICAL
     mode: taint
@@ -31,8 +32,7 @@ rules:
           - pattern: flask.request.form.get(...)
           - pattern: flask.request.json[...]
           - pattern: flask.request.get_json(...)
-          # FastAPI / Starlette
-          - pattern: request.query_params[...]
+          # FastAPI / Starlette (query_params is shared above)
           - pattern: request.path_params[...]
           # Generic
           - pattern: input(...)
@@ -49,10 +49,8 @@ rules:
       - patterns:
           - pattern: compile($CODE, $FILENAME, $MODE, ...)
           - focus-metavariable: $CODE
-    pattern-sanitizers:
-      # ast.literal_eval is a safe subset — only evaluates literals
-      - pattern: ast.literal_eval(...)
-        exact: true
+    # Literal parsing may return code text consumed by a later sink; it does
+    # not sanitise that text for eval, exec or compile.
     metadata:
       cwe: ["CWE-95"]
       owasp_top_10: ["A3:2021-Injection"]
