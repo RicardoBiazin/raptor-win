@@ -6,7 +6,7 @@
 # ASCII-only de proposito: o Windows PowerShell 5.1 le .ps1 como ANSI e quebra
 # com UTF-8 sem BOM.
 #
-# Uso:  .\scan-all.ps1 -Base C:\DEV
+# Uso:  .\scan-all.ps1 -Base V:\DEV
 #       .\scan-all.ps1 -Base C:\repos -Out C:\repos\_seg -Skip @('venv','tmp')
 param(
   [Parameter(Mandatory = $true)][string]$Base,
